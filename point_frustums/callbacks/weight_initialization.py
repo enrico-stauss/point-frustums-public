@@ -18,6 +18,10 @@ class ModelWeightsFromCheckpoint(Callback):
         logger.info(f"Initializing the model weights from the checkpoint '{self.checkpoint_path}'")
         pl_module.load_state_dict(torch.load(self.checkpoint_path, map_location="cpu")["state_dict"])
 
+    def on_validation_start(self, trainer: Trainer, pl_module: Detection3DRuntime) -> None:
+        logger.info(f"Initializing the model weights from the checkpoint '{self.checkpoint_path}'")
+        pl_module.load_state_dict(torch.load(self.checkpoint_path, map_location="cpu")["state_dict"])
+
 
 class WeightInitLSUV(Callback):
     """

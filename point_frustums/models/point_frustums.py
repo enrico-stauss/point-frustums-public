@@ -415,7 +415,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         return torch.einsum("...ij,...jk->...ik", rotation_matrices, x)
 
     def _encode_velocity(
-        self, x: torch.tensor, ego_velocity: torch.Tensor, *, idx_feat: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, ego_velocity: torch.Tensor, *, idx_feat: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Encode the velocity as [normal, tangential] velocity by rotating it by the negative of the azimuthal position.
@@ -501,7 +501,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         # Initialize the center distance to all zeros
         center_distance = torch.zeros_like(binary_pre_mapping, dtype=torch.float)
         # Calculate the cartesian distances between predictions and mapped targets (prev.: the distance of radius)
-        center_distance[idx] = (feat_centers[idx[0], :] - targets["center"][idx[1], :]).norm(dim=-1)
+        center_distance[idx] = torch.abs(feat_centers[idx[0], :].norm(dim=-1) - targets["center"][idx[1], :].norm(dim=-1))
         # Normalize the distance by a factor based on the target box size
         center_distance[idx] = center_distance[idx].div(targets["wlh"][idx[1], :].norm(dim=-1))
         # Squash the relative distance to the range [0, 1) by application of tanh
@@ -1037,7 +1037,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         pass
 
     def configure_optimizers(self, *args, **kwargs):
-        lr = 5e-3
+        lr = 0.5e-2
         optimizer = optim.AdamW(params=self.parameters(), lr=lr, weight_decay=0.01, amsgrad=False)
         steps_per_epoch = ceil(len(self.trainer.train_dataloader) / self.trainer.accumulate_grad_batches)
         steps_total = self.trainer.estimated_stepping_batches
@@ -1046,8 +1046,9 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
             max_lr=lr,
             epochs=self.trainer.max_epochs,
             steps_per_epoch=steps_per_epoch,
-            div_factor=50,
-            final_div_factor=1e4,
+            #pct_start=0.15,
+            #div_factor=2e1,
+            #final_div_factor=1e5,
         )
         # n = 2
         # interval = ceil(self.trainer.max_epochs / (n + 1))

@@ -3,18 +3,19 @@ model: ./models/point_frustums.yaml
 
 trainer:
   default_root_dir: training
-  max_epochs: 16
+  max_epochs: 100
   log_every_n_steps: 5
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 2
   gradient_clip_val: 1
   gradient_clip_algorithm: norm
   check_val_every_n_epoch: 1
+  # detect_anomaly: True
   callbacks:
     - LearningRateMonitor
     #- RichProgressBar
-    - class_path: point_frustums.callbacks.WeightInitLSUV
-      init_args:
-        init_types: [ Linear, Conv1d, Conv2d ]
+    #- class_path: point_frustums.callbacks.WeightInitLSUV
+    #  init_args:
+    #    init_types: [ Linear, Conv1d, Conv2d ]
     - class_path: ModelCheckpoint
       init_args:
         monitor: Metric/NDS/val
@@ -23,14 +24,14 @@ trainer:
         save_on_train_epoch_end: False
         auto_insert_metric_name: False
         every_n_epochs: 1
-    - #- LearningRateFinder
+    #- LearningRateFinder
       #- class_path: point_frustums.callbacks.GradientClipping
       #  init_args:
       #    clip_value: 1.0
-      #- point_frustums.callbacks.CreateNuScenesSubmission
-      #- class_path: point_frustums.callbacks.ModelWeightsFromCheckpoint
-      #  init_args:
-      #    checkpoint_path: training_logs/lightning_logs/version_256/checkpoints/epoch=1-step=162.ckpt
+    #- point_frustums.callbacks.CreateNuScenesSubmission
+    #- class_path: point_frustums.callbacks.ModelWeightsFromCheckpoint
+    #  init_args:
+    #    checkpoint_path: training_logs/lightning_logs/version_104/checkpoints/85-151274.ckpt
   logger:
     - class_path: pytorch_lightning.loggers.TensorBoardLogger
       init_args:
@@ -38,6 +39,8 @@ trainer:
     - class_path: pytorch_lightning.loggers.WandbLogger
       init_args:
         project: point_frustums
+        id: l1098k7d
+        resume: must
         save_dir: training_logs
         offline: False
 

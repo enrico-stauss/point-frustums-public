@@ -1,7 +1,7 @@
 class_path: point_frustums.dataloaders.NuScenesDataModule
 init_args:
   batch_size: 8
-  num_workers: 6
+  num_workers: 3
   pin_memory: True
   persistent_workers: True
   drop_last: False
@@ -12,17 +12,17 @@ init_args:
       - class_path: point_frustums.augmentations.SubsampleData
         init_args:
           apply_to: [lidar]
-          drop_ratio: 0.4
+          drop_ratio: 0.2
       - class_path: point_frustums.augmentations.RandomFlipHorizontal
         init_args:
           apply_to: [lidar, targets]
           dimension_mapping_lidar: {y: 1, azimuthal: 7}
-          probability: 0.4
+          probability: 0.2
       - class_path: point_frustums.augmentations.RandomRotate
         init_args:
           apply_to: [ lidar, targets ]
           dimension_mapping_lidar: { x: 0, y: 1, z: 2, azimuthal: 7 }
-          probability: 0.8
+          probability: 0.5
       - class_path: point_frustums.augmentations.Normalize
         init_args:
           apply_to: [lidar]

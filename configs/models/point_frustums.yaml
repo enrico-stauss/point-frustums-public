@@ -17,6 +17,9 @@ init_args:
                 fov_pol_deg: [60, 100]
               decorate:
                 functions:
+# Decorated columns: ['z', 'intensity', 'timestamp', 'radial', 'delta_azi', 'delta_pol', 'delta_r', 'delta_x', 'delta_y', 'delta_z']
+# decorated_mean=tensor([3.5591e-02, 1.4082e-01, 9.3892e-04, 7.2645e-02, 1.7807e-05, 1.7492e-03, 1.6069e-12, 4.7607e-10, 6.0460e-10, 8.4559e-11])
+# decorated_std=tensor([1.0527, 0.9583, 1.0005, 1.0351, 0.2887, 0.2892, 0.5529, 5.0788, 4.8861, 0.3045])
                   - { id: relative_angle, channel: azimuthal, std: 0.29 }
                   - { id: relative_angle, channel: polar, std: 0.29 }
                   - { id: distance_to_mean, channel: radial, std: 0.55 }
@@ -25,10 +28,10 @@ init_args:
                   - { id: distance_to_mean, channel: z, std: 0.3 }
                 channels_out: [ z, intensity, timestamp, radial, delta_azi, delta_pol, delta_r, delta_x, delta_y, delta_z ]
               vectorize:
-                layers: [ 128 ]
+                layers: [ 64 ]
               symmetrize: [ max ]
               reduce:
-                layers: [ 128 ]
+                layers: [ 64 ]
               dropout: 0.1
       neck:
         class_path: point_frustums.models.necks.PointFrustumsNeck
@@ -37,40 +40,41 @@ init_args:
           fpn:
             class_path: point_frustums.models.necks.spherical_coos_fpn.FPN
             init_args:
-              n_channels_in: 128
-              n_channels_out: 256
+              n_channels_in: 64
+              n_channels_out: 64
               layers:
-                l0: {n_blocks: 2, n_channels: 128, downsampling_horizontal: False, downsampling_vertical: False}
-                l1: {n_blocks: 4, n_channels: 256, downsampling_horizontal: True, downsampling_vertical: True}
-                l2: {n_blocks: 4, n_channels: 512, downsampling_horizontal: True, downsampling_vertical: True}
-                l3: {n_blocks: 2, n_channels: 512, downsampling_horizontal: True, downsampling_vertical: True}
-              extra_layers:
-                p4: {downsampling_horizontal: True, downsampling_vertical: False}
+                l0: {n_blocks: 3, n_channels: 64, downsampling_horizontal: False, downsampling_vertical: False}
+                l1: {n_blocks: 3, n_channels: 64, downsampling_horizontal: True, downsampling_vertical: True}
+                l2: {n_blocks: 3, n_channels: 64, downsampling_horizontal: False, downsampling_vertical: False}
+                l3: {n_blocks: 3, n_channels: 64, downsampling_horizontal: True, downsampling_vertical: True}
+                l4: {n_blocks: 2, n_channels: 64, downsampling_horizontal: True, downsampling_vertical: True}
+              extra_layers: {}
+              #  p4: {downsampling_horizontal: True, downsampling_vertical: False}
               upsampling_mode: nearest
               dropout: 0.1
       head:
         class_path: point_frustums.models.heads.PointFrustumsHead
         init_args:
-          n_channels_in: 256
-          layers_in: [l0, l1, l2, l3, p4]
+          n_channels_in: 64
+          layers_in: [l0, l1, l2, l3, l4]
           n_classes: 10
           n_attributes: 8
           n_convolutions_classification: 4
           n_convolutions_regression: 4
-          share_weights: True
-          norm_group_size: 4
+          share_weights: False
+          norm_group_size: 8
           dropout: 0.1
   target_assignment:
-    alpha: 1.0
+    alpha: 1.5
     beta: 1
-    gamma: 1.5
-    max_iter: 10000
-    min_k: 3
+    gamma: 1.2
+    max_iter: 1000
+    min_k: 5
     max_k: 30
     epsilon: 1.0e-1
     threshold: 1e-3
-    upper_bound_multiplier: 1.5
-    lower_bound_multiplier: 0.9
+    upper_bound_multiplier: 2.0
+    lower_bound_multiplier: 0.8
   losses:
     label:
       weight: 2
@@ -81,11 +85,12 @@ init_args:
     center_polar:
       weight: 1
       kwargs:
-        beta: 0.5
+        beta: 0.05
     center_azimuthal:
       weight: 1
+      active: True
       kwargs:
-        beta: 0.5
+        beta: 0.05
     orientation:
       weight: 1
       kwargs:
@@ -96,13 +101,13 @@ init_args:
     vfl:
       active: True
       weight: 1.0
-      from_epoch: 10
+      from_epoch: 0
     attribute:
       active: True
       weight: 1.0
   predictions:
-    score_vfl_factor: 0.3
-    score_threshold: 0.1
+    score_vfl_factor: 0.0
+    score_threshold: 0.2
     nms_threshold: 0.4
   logging:
     frequency_log_train_sample: 10000
