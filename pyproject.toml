@@ -1,36 +1,59 @@
+[project]
+name = "point-frustums-public"
+version = "0.1.0"
+description = "Add your description here"
+readme = "ReadMe.md"
+requires-python = ">=3.12"
+dependencies = [
+    "litdata>=0.2.52",
+    "loguru>=0.7.3",
+    "numpy==2.3.2",
+    "pandas>=2.3.1",
+    "pot[backend-torch]>=0.9.5",
+    "python-dotenv>=1.1.1",
+    "pytorch-lightning[extra]>=2.5.3",
+    "pyyaml>=6.0.2",
+    "tensorboard>=2.20.0",
+    "torch==2.8.0",
+    "torchmetrics>=1.8.1",
+    "torchvision>=0.23.0",
+    "wandb>=0.21.1",
+]
+
+[dependency-groups]
+dev = [
+    "codespell>=2.4.1",
+    "pre-commit>=4.3.0",
+    "pylint>=3.3.8",
+    "pytest>=8.4.1",
+    "ruff>=0.12.9",
+]
+ndk = [
+    "nuscenes-devkit>=1.1.9",
+]
+
+
+[project.scripts]
+point-frustums = "point_frustums.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["test", "test.*"]
+
+[tool.setuptools.package-data]
+point_frustums = ["*.dll", "*.dylib", "*.so", "**/*.so"]
+
+
 [build-system]
-requires = ["setuptools>=58.1.0", "wheel", "numpy>=1.24.2", "torch==2.2.1", "ninja"]
+requires = [
+    "setuptools>=61.0",
+    "wheel",
+    "numpy==2.3.2",
+    "torch==2.8.0",
+    "ninja"
+]
 build-backend = "setuptools.build_meta"
-[tool.black]
-    line-length = 120
-    include = '\.pyi?$'
-    exclude = '''
-    /(
-        \.git
-      | \.hg
-      | \.mypy_cache
-      | \.tox
-      | \.venv
-      | _build
-      | buck-out
-      | build
-      | dist
-    )/
-    '''
-[tool.pylint.'MESSAGES CONTROL']
-    max-line-length = 120
-    disable = '''
-        too-many-arguments,
-        too-many-instance-attributes,
-        too-many-locals,
-        redefined-builtin,
-        missing-module-docstring,
-        unused-argument,
-        unused-variable,
-        missing-function-docstring,
-        missing-class-docstring,
-        too-few-public-methods,
-        fixme,
-    '''
-[tool.pylint.MASTER]
-    ignore-paths = [ "point_frustums/ops/rotation_conversions.py" ]
+
+[tool.ruff]
+# Allow lines to be as long as 120.
+line-length = 120

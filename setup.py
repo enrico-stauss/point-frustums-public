@@ -1,36 +1,63 @@
+"""Build Script"""
+
 import glob
 import os
+import platform
 
 import numpy as np
 import torch
-from setuptools import setup, find_packages
+from setuptools import setup, Extension
 from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension, ROCM_HOME
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT = "point_frustums"
 
 
-def get_extensions():
-    extensions_dir = os.path.join(BASE_DIR, PROJECT, "ops", "csrc")
+def get_extensions() -> list[Extension]:
+    """
+    Get a list of extensions that shall be provided to the setup/build step.
+    :return:
+    """
+    extensions_dir = os.path.join(PROJECT, "ops", "csrc")
     extensions_main = os.path.join(extensions_dir, "ext.cpp")
-    extensions_sources = glob.glob(os.path.join(extensions_dir, "**", "*.cpp"))
+
+    # Gather .cpp sources (relative paths)
+    extensions_sources = [
+        os.path.relpath(p, BASE_DIR)
+        for p in glob.glob(
+            os.path.join(BASE_DIR, extensions_dir, "**", "*.cpp"), recursive=True
+        )
+    ]
+
+    # Ensure no duplicates
+    sources = [extensions_main] + [
+        s for s in extensions_sources if not s.endswith("ext.cpp")
+    ]
 
     is_rocm_pytorch = bool((torch.version.hip is not None) and (ROCM_HOME is not None))
 
-    # common code between cuda and rocm platforms, for hipify version [1,0,0] and later.
-    extensions_sources_cuda = glob.glob(os.path.join(extensions_dir, "**", "*.cu")) + glob.glob(
-        os.path.join(extensions_dir, "*.cu")
-    )
-    sources = [extensions_main] + extensions_sources
-
+    extensions_sources_cuda = [
+        os.path.relpath(p, BASE_DIR)
+        for p in glob.glob(
+            os.path.join(BASE_DIR, extensions_dir, "**", "*.cu"), recursive=True
+        )
+        + glob.glob(os.path.join(BASE_DIR, extensions_dir, "*.cu"))
+    ]
     extension = CppExtension
 
     extra_compile_args = {"cxx": []}
     define_macros = []
 
-    if (torch.cuda.is_available() and ((CUDA_HOME is not None) or is_rocm_pytorch)) or os.getenv(
-        "FORCE_CUDA", "0"
-    ) == "1":
+    if platform.system() == "Darwin":  # macOS
+        extra_compile_args["cxx"].extend(
+            [
+                "-DTORCH_DISABLE_PARALLEL_NATIVE",
+            ]
+        )
+
+    if (
+        torch.cuda.is_available() and ((CUDA_HOME is not None) or is_rocm_pytorch)
+    ) or os.getenv("FORCE_CUDA", "0") == "1":
         extension = CUDAExtension
         sources += extensions_sources_cuda
 
@@ -48,10 +75,10 @@ def get_extensions():
             extra_compile_args["nvcc"] = []
 
         nvcc_flags_env = os.getenv("NVCC_FLAGS", "")
-        if nvcc_flags_env != "":
-            extra_compile_args["nvcc"].extend(nvcc_flags_env.split(" "))
+        if nvcc_flags_env:
+            extra_compile_args["nvcc"].extend(nvcc_flags_env.split())
 
-    include_dirs = [extensions_dir]
+    include_dirs = [os.path.join(BASE_DIR, extensions_dir)]
 
     ext_modules = [
         extension(
@@ -66,42 +93,8 @@ def get_extensions():
     return ext_modules
 
 
-# Build main project
+# Build extensions only - all metadata is now in pyproject.toml.old
 setup(
-    name=PROJECT,
-    version="0.0.0",
-    packages=find_packages(
-        # All keyword arguments below are optional:
-        where=f"{BASE_DIR}",  # '.' by default
-        exclude=["tests"],  # empty by default
-    ),
-    package_dir={"": f"{BASE_DIR}"},
-    entry_points={
-        "console_scripts": [
-            f"{PROJECT.replace('_', '-')} = {PROJECT}.__main__:main",
-        ]
-    },
-    package_data={PROJECT: ["*.dll", "*.dylib", "*.so", "**/*.so"]},
-    install_requires=[
-        "pytorch-lightning[extra]",
-        "torchmetrics",
-        "litdata",
-        "nuscenes-devkit>=1.1.10",
-        "numpy>=1.24.2",
-        "torch==2.2.1",
-        "torchvision",
-        "tensorboard>=2.12.2",
-        "torch_tb_profiler",
-        "xformers>=0.0.23",
-        "numpy-quaternion",
-        "pyquaternion",
-        "loguru",
-        "prettytable",
-        "PyYaml",
-        "wandb",
-        "POT[backend-torch]",
-    ],
-    extras_require={"dev": ["pytest", "pylint", "pre-commit", "black", "pycln"], "test": ["pytest"]},
     ext_modules=get_extensions(),
     include_dirs=[np.get_include()],
     cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension},
