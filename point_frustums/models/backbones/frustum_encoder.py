@@ -1,3 +1,4 @@
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from functools import cached_property
@@ -6,7 +7,9 @@ from typing import Optional, Literal, Dict
 
 import torch
 from torch import nn
-from xformers.ops.fmha import attn_bias, memory_efficient_attention
+
+if sys.platform != "darwin":  # "darwin" is macOS
+    from xformers.ops.fmha import attn_bias, memory_efficient_attention  # NOQA
 
 from point_frustums.config_dataclasses.point_frustums import (
     ConfigDiscretize,
@@ -347,7 +350,11 @@ def decorator_relative_angle(pc_channel: torch.Tensor, delta_rad: float, std: Op
 
 
 class FrustumEncoder(nn.Module):  # pylint: disable=too-many-instance-attributes
-    symmetric_functions = {"max": symmetrize_max, "mean": symmetrize_mean, "std": symmetrize_std}
+    symmetric_functions = {
+        "max": symmetrize_max,
+        "mean": symmetrize_mean,
+        "std": symmetrize_std,
+    }
 
     def __init__(  # pylint: disable=too-many-arguments
         self,
@@ -475,7 +482,10 @@ class FrustumEncoder(nn.Module):  # pylint: disable=too-many-instance-attributes
             pc_channel = pc[:, self.channels_in.index(fn.channel)]
             match fn.id:
                 case "relative_angle":
-                    delta_rad = {"azimuthal": self.discretize.delta_azi, "polar": self.discretize.delta_pol}[fn.channel]
+                    delta_rad = {
+                        "azimuthal": self.discretize.delta_azi,
+                        "polar": self.discretize.delta_pol,
+                    }[fn.channel]
                     decorated_channels.append(
                         decorator_relative_angle(
                             pc_channel=pc_channel,
@@ -563,7 +573,11 @@ class FrustumEncoder(nn.Module):  # pylint: disable=too-many-instance-attributes
             i_unique, i_inv, counts, counts_padded = self.get_frustum_stats(i_frustum)
             # Apply decorators to entire PC
             decorated = self.apply_decorators(
-                pc, counts_padded=counts_padded, i_frustum=i_frustum, i_unique=i_unique, i_inv=i_inv
+                pc,
+                counts_padded=counts_padded,
+                i_frustum=i_frustum,
+                i_unique=i_unique,
+                i_inv=i_inv,
             )
             # Squash irregular number of points to regular array by applying symmetric function
             # PyTorch automatically assigns tensors C-contiguous which matches the creation of the global index
