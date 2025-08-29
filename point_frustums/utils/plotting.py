@@ -13,13 +13,13 @@ from point_frustums.geometry.utils import get_corners_3d
 from point_frustums.utils.custom_types import Boxes, Targets
 
 COLORS = {
-    "Blue": np.array([65, 47, 215]) / 255,
-    "DarkBlue": np.array([22, 1, 43]) / 255,
-    "Yellow": np.array([254, 239, 58]) / 255,
-    "Red": np.array([231, 52, 50]) / 255,
-    "Green": np.array([40, 238, 133]) / 255,
-    "LightBlue": np.array([153, 204, 255]) / 255,
-    "MintGreen": np.array([179, 255, 204]) / 255,
+    "Blue": np.array([65, 47, 215]),
+    "DarkBlue": np.array([22, 1, 43]),
+    "Yellow": np.array([254, 239, 58]),
+    "Red": np.array([231, 52, 50]),
+    "Green": np.array([40, 238, 133]),
+    "LightBlue": np.array([153, 204, 255]),
+    "MintGreen": np.array([179, 255, 204]),
 }
 
 
@@ -88,24 +88,24 @@ def plot_pointcloud_bev(
 
     bboxes_tg = get_bev_bbox(targets["center"], targets["wlh"], targets["orientation"])
     velocities_tg = get_bev_velocity_arrows(targets["velocity"], targets["center"])
-    bboxes_tg.set(color=COLORS["Green"], alpha=0.8, edgecolor=COLORS["MintGreen"], linewidth=0.4)
-    velocities_tg.set(color=COLORS["MintGreen"], alpha=1, linewidth=0.01)
+    bboxes_tg.set(color=COLORS["Green"] / 255, alpha=0.8, edgecolor=COLORS["MintGreen"] / 255, linewidth=0.4)
+    velocities_tg.set(color=COLORS["MintGreen"] / 255, alpha=1, linewidth=0.01)
     ax.add_collection(bboxes_tg)
     ax.add_collection(velocities_tg)
 
     mean_x, mean_y = points.mean(dim=0)[[0, 1]].tolist()
-    ax.scatter(points[:, 0], points[:, 1], s=0.1, alpha=0.6, color=COLORS["Yellow"], marker=".", lw=0)
+    ax.scatter(points[:, 0], points[:, 1], s=0.1, alpha=0.6, color=COLORS["Yellow"] / 255, marker=".", lw=0)
 
     if ego_velocity is not None:
         v_x, v_y = ego_velocity[[0, 1]].tolist()
         ego_velocity_arrow = PatchCollection([Arrow(mean_x, mean_y, v_x, v_y)], alpha=1, linewidth=0.1)
-        ego_velocity_arrow.set(color=COLORS["Blue"], alpha=0.8, linewidth=0.05)
+        ego_velocity_arrow.set(color=COLORS["Blue"] / 255, alpha=0.8, linewidth=0.05)
 
     if detections is not None:
         bboxes_gt = get_bev_bbox(detections["center"], detections["wlh"], detections["orientation"])
         velocities_gt = get_bev_velocity_arrows(detections["velocity"], detections["center"])
-        bboxes_gt.set(color=COLORS["Red"], alpha=0.4, edgecolor=COLORS["Red"], linewidth=0.2)
-        velocities_gt.set(color=COLORS["Red"], alpha=0.6, linewidth=0.01)
+        bboxes_gt.set(color=COLORS["Red"] / 255, alpha=0.4, edgecolor=COLORS["Red"] / 255, linewidth=0.2)
+        velocities_gt.set(color=COLORS["Red"] / 255, alpha=0.6, linewidth=0.01)
         ax.add_collection(bboxes_gt)
         ax.add_collection(velocities_gt)
 
@@ -130,6 +130,11 @@ def create_boxes_log(boxes: Boxes, color: tuple[int, int, int]) -> tuple[list[di
     corners = get_corners_3d(boxes["center"], boxes["wlh"], boxes["orientation"]).tolist()
     labels = boxes["class"].tolist()
     centers = boxes["center"].tolist()
+
+    scores = None
+    if "scores" in boxes:
+        scores = boxes["score"].tolist()
+
     velocities = torch.nan_to_num(boxes["velocity"])
     if velocities.size(1) == 2:
         velocities = torch.nn.functional.pad(velocities, (0, 1, 0, 0))
@@ -139,7 +144,10 @@ def create_boxes_log(boxes: Boxes, color: tuple[int, int, int]) -> tuple[list[di
     velocity_list = []
 
     for i in range(n_boxes):
-        box_list.append({"corners": corners[i], "class": labels[i], "color": color})
+        box = {"corners": corners[i], "label": labels[i], "color": color}
+        if scores is not None:
+            box["score"] = scores[i]
+        box_list.append(box)
         velocity_list.append({"start": centers[i], "end": vel_end[i]})
     return box_list, velocity_list
 
@@ -169,10 +177,10 @@ def plot_pointcloud_wandb(
 
     if label_enum is not None:
         for box in boxes:
-            box["class"] = label_enum.from_index(box["class"]).name
+            box["label"] = label_enum.from_index(box["label"]).name
     else:
         for box in boxes:
-            box["class"] = str(box["class"])
+            box["label"] = str(box["label"])
 
     if ego_velocity is not None:
         velocities.append({"start": [0, 0, 0], "end": ego_velocity.tolist()})
@@ -184,7 +192,9 @@ def plot_pointcloud_wandb(
     intensity_rgb = colormaps["plasma"](points[:, 3].numpy() / 255)[:, :3] * 255
     points = np.concatenate((points[:, :3].numpy(), intensity_rgb), axis=1)
 
-    pointcloud = wandb.Object3D({"type": "lidar/beta", "points": points, "boxes": boxes, "vectors": velocities})
+    pointcloud = wandb.Object3D.from_point_cloud(
+        point_cloud_type="lidar/beta", points=points, boxes=boxes, vectors=velocities
+    )
     wandb_logger.experiment.log({tag: pointcloud, "trainer/global_step": step}, commit=False)
 
 
