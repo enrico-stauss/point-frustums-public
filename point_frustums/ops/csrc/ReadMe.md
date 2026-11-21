@@ -66,6 +66,41 @@ The first version of the NMS was written between January and April 2024. It cons
 - **Integration:** both backends are registered as a PyTorch operator (`TORCH_LIBRARY`, [`ext.cpp`](ext.cpp)) and
   selected by the device of the inputs ([`nms/nms.h`](nms/nms.h)).
 
+## Port to the Rewritten PyTorch3D IoU (2026)
+
+PyTorch3D later rewrote `box3d_overlap`
+([facebookresearch/pytorch3d@31debbd](https://github.com/facebookresearch/pytorch3d/commit/31debbdc7a9a7521b3ce5cfabfe21992a987a094)).
+The new version clips box 1 by the six half-spaces of box 2 one after another. This is exact, handles boxes that share
+a face, and no longer needs the fixed-size face buffer. It is a single header that compiles for both host and device.
+The NMS was ported onto it (commit "Port the 3D IoU and NMS kernels to pytorch3d's sequential polyhedron clipping"):
+
+- **Shared IoU header:** [`iou_box3d/iou_utils.h`](iou_box3d/iou_utils.h) is now the upstream header and is used by
+  the CPU and CUDA builds. Both call `iou_box3d::BoxOverlap` on the raw corners.
+- **Less precomputed data:** per box, the NMS now only stores the center and volume (`ComputeBoxMeta` in
+  [`nms/nms_utils.h`](nms/nms_utils.h)) for the distance pre-check, instead of triangles and planes.
+- **Parallel CPU loop:** the CPU outer loop runs in parallel (`at::parallel_for`). This is possible because a box only
+  depends on the boxes with a higher score, not on whether those are kept.
+- **CUDA grid and memory:** the CUDA grid is now sized to the input. The original launch used a fixed 256 x 256 grid
+  of 16 x 16 blocks, so boxes beyond index 4096 were never compared. The `N x N` duplicate matrix was also replaced by
+  an `N`-sized mask, and threads exit early once their box is already known to be a duplicate.
+
+Results on CPU (Apple M1 Pro):
+
+|                                           | Original (2024) | Ported (2026) |
+|-------------------------------------------|-----------------|---------------|
+| Max. IoU error vs. exact float64 reference | 7.8e-4          | 7.7e-8        |
+| IoU, 1000 x 1000 boxes                     | 12.1 s          | 0.019 s       |
+| NMS, 1000 boxes                            | 1.1 s           | 0.005 s       |
+
+The keep masks of the original and the ported NMS are identical.
+
+## Status
+
+- **CPU:** tested and used for training on macOS.
+- **CUDA:** the ported CUDA implementation ([`nms/nms_cuda.cu`](nms/nms_cuda.cu),
+  [`iou_box3d/iou_box3d.cu`](iou_box3d/iou_box3d.cu)) has not yet been compiled and tested on a CUDA machine since the
+  2026 port.
+
 ## Layout
 
 ```
@@ -73,22 +108,20 @@ csrc/
 ├── ext.cpp                  # Operator registration (torch.ops.point_frustums.{iou_box3d, iou_box3d_pairwise, nms})
 ├── cuda_version.cu          # CUDA version query
 ├── iou_box3d/
-│   ├── iou_utils.h          # Exact 3D IoU, CPU (PyTorch3D, modified)
-│   ├── iou_utils.cuh        # Exact 3D IoU, CUDA (PyTorch3D, modified)
+│   ├── iou_utils.h          # Exact 3D IoU (PyTorch3D, header-only, CPU/CUDA)
 │   ├── iou_box3d.h          # Device dispatch
 │   ├── iou_box3d_cpu.cpp    # CPU: N x M and pairwise IoU
 │   └── iou_box3d.cu         # CUDA: N x M and pairwise IoU
 ├── nms/
-│   ├── nms_utils.h/.cuh     # Packed per-box parameters (BoxParameters)
+│   ├── nms_utils.h          # Per-box meta data and distance pre-check (CPU/CUDA)
 │   ├── nms.h                # Device dispatch
 │   ├── nms.cpp              # CPU NMS
 │   └── nms_cuda.cu          # CUDA NMS
 └── utils/
-    ├── float_math.cuh       # float3 arithmetic for CUDA
-    ├── vec3.h               # 3D vector type for CPU
     └── pytorch3d_cutils.h   # Input checks
 ```
 
 ## Credits
 
-The 3D IoU builds on PyTorch3D's `box3d_overlap` (BSD license, (c) Meta Platforms, Inc.).
+The 3D IoU builds on PyTorch3D's `box3d_overlap` (BSD license, (c) Meta Platforms, Inc.). The 2026 port was developed
+with the help of an AI coding assistant.
