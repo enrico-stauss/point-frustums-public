@@ -436,10 +436,9 @@ class NuScenes(Dataset):
                 sample_data = self.db.get("sample_data", ref_sample_data_token)
                 # Get the token of the calibrated sensor record
                 calibrated_sensor_data = self.db.get("calibrated_sensor", sample_data["calibrated_sensor_token"])
-                # Load the inverse rotation between the calibrated sensor and the EGO vehicle as Quaternion
-                rotation = Quaternion(calibrated_sensor_data["rotation"]).inverse
-                # Transform to the COOS of the annotations
-                velocity = rotation.inverse.rotate(velocity)
+                # The calibrated sensor rotation maps the sensor to the EGO COOS, its inverse maps the EGO velocity
+                #   into the COOS of the annotations (equivalent to the transformation of the targets)
+                velocity = Quaternion(calibrated_sensor_data["rotation"]).inverse.rotate(velocity).astype(np.float32)
             meta["velocity"] = torch.from_numpy(velocity).float()
 
         return meta
