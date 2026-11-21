@@ -13,3 +13,4 @@
 /training_logs
 /test/metrics/nds_test_output/*
 /litdata
+/data

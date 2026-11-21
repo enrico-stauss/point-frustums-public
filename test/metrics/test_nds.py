@@ -1,4 +1,5 @@
 import json
+import os
 from collections.abc import Sequence
 from enum import Enum
 from functools import cached_property
@@ -19,7 +20,16 @@ from point_frustums import ROOT_DIR
 from point_frustums.metrics.detection.nds import NuScenesDetectionScore
 from point_frustums.utils.environment_helpers import data_root_getter
 
-torch.set_default_dtype(torch.float64)
+TEST_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+@pytest.fixture(autouse=True, scope="module")
+def float64_default_dtype():
+    """Evaluate in FP64, but restore the default afterward so it does not leak into other test modules."""
+    previous = torch.get_default_dtype()
+    torch.set_default_dtype(torch.float64)
+    yield
+    torch.set_default_dtype(previous)
 
 
 class Labels:
@@ -293,7 +303,7 @@ class TestNuScenesDetectionScore:
     @pytest.mark.parametrize("coos", ["global", "lidar"])
     def test_cases(self, case: str, coos: str):
         assert coos in ("global", "lidar")
-        detections_file = f"nds_test_data/{case}_detections.json"
+        detections_file = f"{TEST_DIR}/nds_test_data/{case}_detections.json"
         targets = self._prepare_targets(coos=coos)
         detections = self._prepare_detections(detections_file, coos=coos)
 
@@ -301,9 +311,9 @@ class TestNuScenesDetectionScore:
         assert set(detections.keys()) == set(targets.keys())
         for sample_token, sample_detections in detections.items():
             metric.update([sample_detections], [targets[sample_token]])
-        metric_results = metric.compute(f"nds_test_output/metric_results_{case}_{coos}.json")
+        metric_results = metric.compute(f"{TEST_DIR}/nds_test_output/metric_results_{case}_{coos}.json")
 
-        with open(f"nds_test_data/{case}_results.json", "r", encoding="utf-8") as f:
+        with open(f"{TEST_DIR}/nds_test_data/{case}_results.json", "r", encoding="utf-8") as f:
             reference_results = json.load(f)
 
         abs_tol = 1e-8
