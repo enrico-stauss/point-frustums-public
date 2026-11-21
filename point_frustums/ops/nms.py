@@ -1,5 +1,7 @@
 import torch
 
+from point_frustums.ops import metal
+
 
 def nms_3d(
     labels: torch.Tensor,
@@ -20,13 +22,8 @@ def nms_3d(
     if labels.numel() == 0:
         return torch.empty_like(labels).bool()
 
-    mps = False
     if labels.device.type == "mps":
-        mps = True
-        labels, scores, boxes = labels.int().cpu(), scores.cpu(), boxes.cpu()
-    result = torch.ops.point_frustums.nms(labels.int(), scores, boxes, iou_threshold, distance_threshold).bool()
+        # The C++ extension only provides CPU and CUDA kernels, MPS uses the equivalent Metal kernels
+        return metal.nms(labels, scores, boxes, iou_threshold, distance_threshold)
 
-    if mps:
-        result = result.to("mps")
-
-    return result
+    return torch.ops.point_frustums.nms(labels.int(), scores, boxes, iou_threshold, distance_threshold).bool()

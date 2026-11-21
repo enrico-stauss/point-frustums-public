@@ -7,8 +7,10 @@
  */
 
 #pragma once
+#ifndef __METAL_VERSION__
 #include <math.h>
 #include <stdint.h>
+#endif
 
 // Intersection volume of two boxes, shared by the CPU and CUDA
 // implementations.
@@ -26,15 +28,28 @@
 #define IOU_HOST_DEVICE
 #endif
 
+// Metal requires explicit address spaces for pointers, references and program
+// scope constants. They expand to nothing for the CPU and CUDA builds, so the
+// same algorithm is compiled for all three backends (see ops/metal.py).
+#ifdef __METAL_VERSION__
+#define IOU_THREAD thread
+#define IOU_GLOBAL device
+#define IOU_CONSTANT constant
+#else
+#define IOU_THREAD
+#define IOU_GLOBAL
+#define IOU_CONSTANT
+#endif
+
 namespace iou_box3d {
 
 // In exact arithmetic the clipped polyhedron has at most 6 + 6 faces (each
 // cut adds a single cap face), an original face has at most 4 + 6 vertices and
 // a cap at most 12. Rounding on boxes whose faces are not quite planar can add
 // slivers with more vertices; the most seen in testing was 20.
-constexpr int kMaxFaces = 12;
-constexpr int kMaxFaceVerts = 32;
-constexpr int kMaxCapEdges = 32;
+IOU_CONSTANT constexpr int kMaxFaces = 12;
+IOU_CONSTANT constexpr int kMaxFaceVerts = 32;
+IOU_CONSTANT constexpr int kMaxCapEdges = 32;
 
 template <typename T>
 struct Point {
@@ -43,44 +58,50 @@ struct Point {
 
 template <typename T>
 IOU_HOST_DEVICE inline Point<T> operator+(
-    const Point<T>& a,
-    const Point<T>& b) {
+    const IOU_THREAD Point<T>& a,
+    const IOU_THREAD Point<T>& b) {
   return {a.x + b.x, a.y + b.y, a.z + b.z};
 }
 
 template <typename T>
 IOU_HOST_DEVICE inline Point<T> operator-(
-    const Point<T>& a,
-    const Point<T>& b) {
+    const IOU_THREAD Point<T>& a,
+    const IOU_THREAD Point<T>& b) {
   return {a.x - b.x, a.y - b.y, a.z - b.z};
 }
 
 template <typename T>
-IOU_HOST_DEVICE inline Point<T> operator*(const Point<T>& a, const T b) {
+IOU_HOST_DEVICE inline Point<T> operator*(const IOU_THREAD Point<T>& a, const T b) {
   return {a.x * b, a.y * b, a.z * b};
 }
 
 template <typename T>
-IOU_HOST_DEVICE inline bool operator==(const Point<T>& a, const Point<T>& b) {
+IOU_HOST_DEVICE inline bool operator==(const IOU_THREAD Point<T>& a, const IOU_THREAD Point<T>& b) {
   return a.x == b.x && a.y == b.y && a.z == b.z;
 }
 
 template <typename T>
-IOU_HOST_DEVICE inline T Dot(const Point<T>& a, const Point<T>& b) {
+IOU_HOST_DEVICE inline T Dot(const IOU_THREAD Point<T>& a, const IOU_THREAD Point<T>& b) {
   return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
 IOU_HOST_DEVICE inline float Fma(const float a, const float b, const float c) {
+#ifdef __METAL_VERSION__
+  return fma(a, b, c);
+#else
   return fmaf(a, b, c);
+#endif
 }
 
+#ifndef __METAL_VERSION__
 IOU_HOST_DEVICE inline double
 Fma(const double a, const double b, const double c) {
   return fma(a, b, c);
 }
+#endif
 
 template <typename T>
-IOU_HOST_DEVICE inline Point<T> Cross(const Point<T>& a, const Point<T>& b) {
+IOU_HOST_DEVICE inline Point<T> Cross(const IOU_THREAD Point<T>& a, const IOU_THREAD Point<T>& b) {
   return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
 }
 
@@ -107,14 +128,14 @@ struct Polyhedron {
 };
 
 template <typename T>
-IOU_HOST_DEVICE inline void LoadBox(const float* box, Point<T> corners[8]) {
+IOU_HOST_DEVICE inline void LoadBox(const IOU_GLOBAL float* box, IOU_THREAD Point<T> corners[8]) {
   for (int i = 0; i < 8; ++i) {
     corners[i] = {T(box[3 * i]), T(box[3 * i + 1]), T(box[3 * i + 2])};
   }
 }
 
 template <typename T>
-IOU_HOST_DEVICE inline Point<T> BoxCenter(const Point<T> corners[8]) {
+IOU_HOST_DEVICE inline Point<T> BoxCenter(const IOU_THREAD Point<T> corners[8]) {
   Point<T> sum = corners[0];
   for (int i = 1; i < 8; ++i) {
     sum = sum + corners[i];
@@ -126,8 +147,8 @@ IOU_HOST_DEVICE inline Point<T> BoxCenter(const Point<T> corners[8]) {
 // mirror images.
 template <typename T>
 IOU_HOST_DEVICE inline T BoxSignedVolume(
-    const Point<T> corners[8],
-    const Point<T>& center) {
+    const IOU_THREAD Point<T> corners[8],
+    const IOU_THREAD Point<T>& center) {
   T vol = 0;
   for (int f = 0; f < 6; ++f) {
     const Point<T> v0 = corners[BoxFaceCorner(f, 0)] - center;
@@ -140,7 +161,7 @@ IOU_HOST_DEVICE inline T BoxSignedVolume(
 }
 
 template <typename T>
-IOU_HOST_DEVICE inline T PolyhedronSignedVolume(const Polyhedron<T>& poly) {
+IOU_HOST_DEVICE inline T PolyhedronSignedVolume(const IOU_THREAD Polyhedron<T>& poly) {
   T vol = 0;
   for (int f = 0; f < poly.num_faces; ++f) {
     const Point<T> v0 = poly.verts[f][0];
@@ -156,7 +177,7 @@ IOU_HOST_DEVICE inline T PolyhedronSignedVolume(const Polyhedron<T>& poly) {
 // the compiler cannot contract differently at different call sites.
 template <typename T>
 IOU_HOST_DEVICE inline T
-PlaneDistance(const Point<T>& normal, const T offset, const Point<T>& p) {
+PlaneDistance(const IOU_THREAD Point<T>& normal, const T offset, const IOU_THREAD Point<T>& p) {
   return Fma(normal.z, p.z, Fma(normal.y, p.y, Fma(normal.x, p.x, -offset)));
 }
 
@@ -165,8 +186,8 @@ PlaneDistance(const Point<T>& normal, const T offset, const Point<T>& p) {
 // so they get bitwise identical points.
 template <typename T>
 IOU_HOST_DEVICE inline Point<T> EdgeCrossing(
-    const Point<T>& vin,
-    const Point<T>& vout,
+    const IOU_THREAD Point<T>& vin,
+    const IOU_THREAD Point<T>& vout,
     const T s_in,
     const T s_out) {
   const T t = s_in / (s_in - s_out);
@@ -180,7 +201,7 @@ IOU_HOST_DEVICE inline Point<T> EdgeCrossing(
 // happens when a vertex lies exactly on the plane.
 template <typename T>
 IOU_HOST_DEVICE inline void
-PushVertex(Point<T>* loop, int& len, const Point<T>& p) {
+PushVertex(IOU_THREAD Point<T>* loop, IOU_THREAD int& len, const IOU_THREAD Point<T>& p) {
   if (len == 0 || !(loop[len - 1] == p)) {
     loop[len++] = p;
   }
@@ -190,11 +211,11 @@ PushVertex(Point<T>* loop, int& len, const Point<T>& p) {
 // overflow.
 template <typename T>
 IOU_HOST_DEVICE inline bool AddCapEdge(
-    const Point<T>& from,
-    const Point<T>& to,
-    Point<T>* cap_from,
-    Point<T>* cap_to,
-    int& num_cap_edges) {
+    const IOU_THREAD Point<T>& from,
+    const IOU_THREAD Point<T>& to,
+    IOU_THREAD Point<T>* cap_from,
+    IOU_THREAD Point<T>* cap_to,
+    IOU_THREAD int& num_cap_edges) {
   if (from == to) {
     return true;
   }
@@ -213,15 +234,15 @@ IOU_HOST_DEVICE inline bool AddCapEdge(
 // which is appended to cap_from/cap_to. Returns false on buffer overflow.
 template <typename T>
 IOU_HOST_DEVICE inline bool ClipFace(
-    const Point<T>* verts,
+    const IOU_THREAD Point<T>* verts,
     const int num_verts,
-    const Point<T>& normal,
+    const IOU_THREAD Point<T>& normal,
     const T offset,
-    Point<T>* out,
-    int& num_out,
-    Point<T>* cap_from,
-    Point<T>* cap_to,
-    int& num_cap_edges) {
+    IOU_THREAD Point<T>* out,
+    IOU_THREAD int& num_out,
+    IOU_THREAD Point<T>* cap_from,
+    IOU_THREAD Point<T>* cap_to,
+    IOU_THREAD int& num_cap_edges) {
   T s[kMaxFaceVerts];
   for (int i = 0; i < num_verts; ++i) {
     s[i] = PlaneDistance(normal, offset, verts[i]);
@@ -277,9 +298,9 @@ IOU_HOST_DEVICE inline bool ClipFace(
 // consistently by later clipping.
 template <typename T>
 IOU_HOST_DEVICE inline bool AddCapFace(
-    Polyhedron<T>& poly,
-    const Point<T>* cap_from,
-    const Point<T>* cap_to,
+    IOU_THREAD Polyhedron<T>& poly,
+    const IOU_THREAD Point<T>* cap_from,
+    const IOU_THREAD Point<T>* cap_to,
     const int num_cap_edges) {
   if (num_cap_edges == 0) {
     return true;
@@ -287,7 +308,7 @@ IOU_HOST_DEVICE inline bool AddCapFace(
   if (poly.num_faces == kMaxFaces) {
     return false;
   }
-  Point<T>* cap = poly.verts[poly.num_faces];
+  IOU_THREAD Point<T>* cap = poly.verts[poly.num_faces];
   int len = 0;
   uint32_t used = 0;
   for (int start = 0; start < num_cap_edges; ++start) {
@@ -337,7 +358,7 @@ IOU_HOST_DEVICE inline bool AddCapFace(
 // Clips poly to the half-space dot(normal, p) <= offset.
 template <typename T>
 IOU_HOST_DEVICE inline bool
-ClipByPlane(Polyhedron<T>& poly, const Point<T>& normal, const T offset) {
+ClipByPlane(IOU_THREAD Polyhedron<T>& poly, const IOU_THREAD Point<T>& normal, const T offset) {
   Point<T> cap_from[kMaxCapEdges];
   Point<T> cap_to[kMaxCapEdges];
   int num_cap_edges = 0;
@@ -371,8 +392,8 @@ ClipByPlane(Polyhedron<T>& poly, const Point<T>& normal, const T offset) {
 
 template <typename T>
 IOU_HOST_DEVICE inline bool BoxesDisjoint(
-    const Point<T> corners1[8],
-    const Point<T> corners2[8]) {
+    const IOU_THREAD Point<T> corners1[8],
+    const IOU_THREAD Point<T> corners2[8]) {
   Point<T> lo1 = corners1[0], hi1 = corners1[0];
   Point<T> lo2 = corners2[0], hi2 = corners2[0];
   for (int i = 1; i < 8; ++i) {
@@ -402,7 +423,7 @@ IOU_HOST_DEVICE inline bool BoxesDisjoint(
 // should not happen for valid boxes.
 template <typename T>
 IOU_HOST_DEVICE inline void
-BoxOverlap(const float* box1, const float* box2, T& vol, T& iou) {
+BoxOverlap(const IOU_GLOBAL float* box1, const IOU_GLOBAL float* box2, IOU_THREAD T& vol, IOU_THREAD T& iou) {
   vol = 0;
   iou = 0;
   Point<T> corners1[8];

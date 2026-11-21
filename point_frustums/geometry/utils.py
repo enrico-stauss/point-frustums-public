@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 
+from point_frustums.ops import metal
 from .coordinate_system_conversion import cart_to_sph_torch
 
 
@@ -179,22 +180,21 @@ def iou_vol_3d(boxes1: torch.Tensor, boxes2: torch.Tensor) -> tuple[torch.Tensor
     :param boxes2:
     :return: The IoU and intersecting volume between the input boxes
     """
-    mps = False
     if boxes1.device.type == "mps":
-        mps = True
-        boxes1, boxes2 = boxes1.cpu(), boxes2.cpu()
+        # The C++ extension only provides CPU and CUDA kernels, MPS uses the equivalent Metal kernels
+        iou_box3d, iou_box3d_pairwise = metal.iou_box3d, metal.iou_box3d_pairwise
+    else:
+        iou_box3d, iou_box3d_pairwise = torch.ops.point_frustums.iou_box3d, torch.ops.point_frustums.iou_box3d_pairwise
     if boxes1.shape == boxes2.shape and boxes1.dim() == 3:
-        vol, iou = torch.ops.point_frustums.iou_box3d_pairwise(boxes1, boxes2)
+        vol, iou = iou_box3d_pairwise(boxes1, boxes2)
     elif boxes1.size(1) == 1 and boxes2.size(0) == 1 and boxes1.dim() == 4:
         boxes1, boxes2 = boxes1[:, 0, :, :], boxes2[0, :, :, :]
-        vol, iou = torch.ops.point_frustums.iou_box3d(boxes1, boxes2)
+        vol, iou = iou_box3d(boxes1, boxes2)
     else:
         raise ValueError(
             f"Invalid input shapes {boxes1.shape}, {boxes2.shape}; please provide either both as "
             f"[N, 8, 3] or boxes1.shape==[N,1,8,3] and boxes2.shape==[1,M,8,3]."
         )
     iou = iou.nan_to_num(neginf=0.0, posinf=0.0).clamp(min=0.0, max=1.0).detach()
-    if mps:
-        iou, vol = iou.to("mps"), vol.to("mps")
 
     return iou, vol

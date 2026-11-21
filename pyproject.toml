@@ -48,7 +48,7 @@ where = ["."]
 exclude = ["test", "test.*"]
 
 [tool.setuptools.package-data]
-point_frustums = ["*.dll", "*.dylib", "*.so", "**/*.so"]
+point_frustums = ["*.dll", "*.dylib", "*.so", "**/*.so", "ops/csrc/**/*.h"]
 
 
 [build-system]
