@@ -117,7 +117,9 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
             if isinstance(logger, pytorch_lightning.loggers.TensorBoardLogger):
                 losses_ids = self.losses.losses + ["sum"]
                 layout = {
-                    "Losses": {f"Loss/{l}": ["Multiline", [f"Loss/{l}/train", f"Loss/{l}/val"]] for l in losses_ids}
+                    "Losses": {
+                        f"Loss/{loss}": ["Multiline", [f"Loss/{loss}/train", f"Loss/{loss}/val"]] for loss in losses_ids
+                    }
                 }
                 layout.update(self.nds_train.tensorboard_custom_scalars)
                 logger.experiment.add_custom_scalars(layout)
@@ -195,8 +197,8 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
             strides_pol[layer].extend(n * [1])
             strides_azi[layer].extend(n * [1])
 
-        receptive_fields_pol = {l: get_erf(get_rf(kernels[l], strides_pol[l])) for l in layers}
-        receptive_fields_azi = {l: get_erf(get_rf(kernels[l], strides_azi[l])) for l in layers}
+        receptive_fields_pol = {layer: get_erf(get_rf(kernels[layer], strides_pol[layer])) for layer in layers}
+        receptive_fields_azi = {layer: get_erf(get_rf(kernels[layer], strides_azi[layer])) for layer in layers}
 
         return receptive_fields_pol, receptive_fields_azi
 
@@ -582,7 +584,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
                 target_corners=target_corners,
                 assigned_corners=feat_corners[foreground_index, ...],
                 target_index=match_index[foreground_index],
-                wandb_logger=[l for l in self.loggers if isinstance(l, pytorch_lightning.loggers.WandbLogger)][0],
+                wandb_logger=[lg for lg in self.loggers if isinstance(lg, pytorch_lightning.loggers.WandbLogger)][0],
             )
 
         return match_index
@@ -719,7 +721,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         # Flatten the last 2 dimensions of all predictions featuremaps, swap dimensions  and concatenate
         output_flat = {}
         for head, layers in output.items():
-            output_flat[head] = torch.cat([l.flatten(start_dim=2).transpose(-2, -1) for l in layers.values()], dim=-2)
+            output_flat[head] = torch.cat([x.flatten(start_dim=2).transpose(-2, -1) for x in layers.values()], dim=-2)
         return output_flat
 
     def get_losses(
@@ -1043,7 +1045,6 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         lr = 5e-3
         optimizer = optim.AdamW(params=self.parameters(), lr=lr, weight_decay=0.01, amsgrad=False)
         steps_per_epoch = ceil(len(self.trainer.train_dataloader) / self.trainer.accumulate_grad_batches)
-        steps_total = self.trainer.estimated_stepping_batches
         lr_scheduler = optim.lr_scheduler.OneCycleLR(
             optimizer=optimizer,
             max_lr=lr,
