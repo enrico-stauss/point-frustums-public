@@ -28,7 +28,12 @@ from point_frustums.geometry.rotation_matrix import (
     rotation_matrix_to_rotation_6d,
     rotation_matrix_from_rotation_6d,
 )
-from point_frustums.geometry.utils import get_corners_3d, get_featuremap_projection_boundaries, iou_vol_3d
+from point_frustums.geometry.utils import (
+    angle_to_neg_pi_to_pi,
+    get_corners_3d,
+    get_featuremap_projection_boundaries,
+    iou_vol_3d,
+)
 from point_frustums.metrics.detection.featuremap_level_assignments import (
     FeaturemapLevelAssignments,
     MissedTargets,
@@ -357,7 +362,9 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         #   consider removing the scaling with the frustum angle. This would imply that in a more finely resolved
         #   discretization, the angular loss components become less relevant.
         x[..., 1] = (x[..., 1] - center_pol_azi[..., 0]) * x[..., 0]
-        x[..., 2] = (x[..., 2] - center_pol_azi[..., 1]) * x[..., 0]
+        # Wrap the azimuthal delta to (-pi, pi]: targets close to the +-pi ambiguity can be assigned to feature vectors on
+        #   the opposite side of the featuremap (see match_target_projection_to_receptive_field)
+        x[..., 2] = angle_to_neg_pi_to_pi(x[..., 2] - center_pol_azi[..., 1]) * x[..., 0]
         return x
 
     def _decode_center(self, x: torch.Tensor, idx_feat: Optional[torch.Tensor] = None) -> torch.Tensor:
