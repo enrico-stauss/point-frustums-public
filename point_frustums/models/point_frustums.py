@@ -1005,6 +1005,8 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
             self.nds_train.reset()
             modified_frequency = self.logging.frequency_log_train_sample / self.trainer.log_every_n_steps  # NOQA
             self._post_pointcloud(batch, detections, logging_frequency=modified_frequency, prefix="Train")
+        # Release the MPS cache last (see BaseRuntime), after the detections of this batch were evaluated
+        super().on_train_batch_end(outputs, batch, batch_idx)
 
     VAL_STEP_OUTPUT = dict[Literal["losses", "detections", "network"], Any]
 
@@ -1027,6 +1029,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
             logging_frequency=self.logging.frequency_log_val_sample,
             prefix="Val",
         )
+        super().on_validation_batch_end(outputs, batch, batch_idx, dataloader_idx)
 
     def on_validation_epoch_end(self) -> None:
         nds = self.nds_val.compute()
