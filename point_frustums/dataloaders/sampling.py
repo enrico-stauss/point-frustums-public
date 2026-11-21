@@ -14,8 +14,10 @@ Strategies:
 """
 
 import hashlib
+import io
 import json
 import os
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -24,6 +26,8 @@ import torch
 from litdata import StreamingDataset
 from loguru import logger
 from torch.utils.data import Dataset, WeightedRandomSampler
+
+from point_frustums.utils import storage
 
 
 @dataclass(frozen=True)
@@ -116,10 +120,64 @@ def weighted_sampler(
     return WeightedRandomSampler(weights, num_samples=num_samples, replacement=True)
 
 
+TARGET_COUNTS_FILE = "target_counts.pt"
+
+
+def _read_index(input_dir: str) -> bytes:
+    return storage.read_bytes(storage.join(input_dir, "index.json"))
+
+
+def _fingerprint(index: bytes) -> str:
+    return hashlib.sha1(index).hexdigest()
+
+
 def num_streaming_items(input_dir: str) -> int:
-    """Total number of items in an optimized litdata directory (independent of workers and distributed setup)."""
-    with open(os.path.join(input_dir, "index.json"), "r", encoding="utf-8") as f:
-        return sum(chunk["chunk_size"] for chunk in json.load(f)["chunks"])
+    """
+    Total number of items in an optimized litdata directory (independent of workers and distributed setup). The
+    directory can be local or remote (see point_frustums.utils.storage).
+    """
+    return sum(chunk["chunk_size"] for chunk in json.loads(_read_index(input_dir))["chunks"])
+
+
+def write_target_counts(
+    input_dir: str,
+    counts: torch.Tensor,
+    sample_tokens: Optional[Sequence[str]] = None,
+    extra: Optional[dict] = None,
+) -> None:
+    """
+    Store the targets per class of every item (in the order of the litdata indices) next to the index.json of an
+    optimized litdata directory, tagged with the fingerprint of the current index.json.
+    :param input_dir: Local or remote litdata directory
+    :param counts: [N_items, N_classes]
+    :param sample_tokens: Optionally, the sample token of every item (used to resume incremental builds)
+    :param extra: Optionally, additional (picklable with weights_only) entries, e.g. the state of an incremental build
+    """
+    index = _read_index(input_dir)
+    if (n_items := sum(chunk["chunk_size"] for chunk in json.loads(index)["chunks"])) != counts.shape[0]:
+        raise ValueError(f"Got target counts for {counts.shape[0]} items but the dataset holds {n_items} items")
+    content = {"fingerprint": _fingerprint(index), "counts": counts}
+    if sample_tokens is not None:
+        content["sample_tokens"] = list(sample_tokens)
+    content.update(extra or {})
+    with tempfile.TemporaryDirectory() as tmp:
+        local = os.path.join(tmp, TARGET_COUNTS_FILE)
+        torch.save(content, local)
+        storage.write_file(local, storage.join(input_dir, TARGET_COUNTS_FILE))
+
+
+def read_target_counts(input_dir: str) -> Optional[dict]:
+    """
+    Load the stored target counts if they exist and match the current index.json of the litdata directory, else None.
+    :return: {"fingerprint": str, "counts": [N_items, N_classes], "sample_tokens": Optional[list[str]]} or None
+    """
+    path = storage.join(input_dir, TARGET_COUNTS_FILE)
+    if not storage.exists(path):
+        return None
+    content = torch.load(io.BytesIO(storage.read_bytes(path)), weights_only=True)
+    if content["fingerprint"] != _fingerprint(_read_index(input_dir)):
+        return None
+    return content
 
 
 class IndexedStreamingDataset(Dataset):
@@ -142,18 +200,22 @@ class IndexedStreamingDataset(Dataset):
 def count_targets_streaming(input_dir: str, n_classes: int) -> torch.Tensor:
     """
     Count the targets per class for every item of an optimized litdata directory, in the order of the litdata indices.
-    The counts are taken from the stored targets, hence are consistent with the training targets by construction. They
-    are cached next to the index.json and recomputed if the latter changes. Reading an item takes ~1ms (the chunks are
-    memory-mapped), so a single process is faster than spawning workers.
+
+    The counts are cached next to the index.json (see write_target_counts) and recomputed if the latter changes. For
+    local directories, missing counts are taken from the stored targets, hence are consistent with the training targets
+    by construction. Reading an item takes ~1ms (the chunks are memory-mapped), so a single process is faster than
+    spawning workers. Remote directories have to provide the counts, as counting would download the whole dataset; the
+    streaming build (point_frustums.dataloaders.build_streaming) writes them.
     :return: [N_items, N_classes]
     """
-    with open(os.path.join(input_dir, "index.json"), "rb") as f:
-        fingerprint = hashlib.sha1(f.read()).hexdigest()
-    cache_file = os.path.join(input_dir, "target_counts.pt")
-    if os.path.exists(cache_file):
-        cached = torch.load(cache_file, weights_only=True)
-        if cached["fingerprint"] == fingerprint and cached["counts"].shape[1] == n_classes:
-            return cached["counts"]
+    cached = read_target_counts(input_dir)
+    if cached is not None and cached["counts"].shape[1] == n_classes:
+        return cached["counts"]
+    if storage.is_remote(input_dir):
+        raise FileNotFoundError(
+            f"No up-to-date {TARGET_COUNTS_FILE} in {input_dir}; it is written when building the dataset with "
+            "point_frustums.dataloaders.build_streaming."
+        )
 
     n_items = num_streaming_items(input_dir)
     logger.info(f"Counting the targets per class of {n_items} items in {input_dir} (cached afterwards)")
@@ -162,7 +224,7 @@ def count_targets_streaming(input_dir: str, n_classes: int) -> torch.Tensor:
         [torch.bincount(dataset[i]["targets"]["class"].long(), minlength=n_classes) for i in range(n_items)]
     )
     try:
-        torch.save({"fingerprint": fingerprint, "counts": counts}, cache_file)
+        write_target_counts(input_dir, counts)
     except OSError as err:
-        logger.warning(f"Could not cache the target counts in {cache_file}: {err}")
+        logger.warning(f"Could not cache the target counts in {input_dir}: {err}")
     return counts
