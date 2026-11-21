@@ -29,7 +29,8 @@ class Logging:
     render_target_assignment: bool = False
 
 
-@dataclass(frozen=True, slots=True)
+# No slots: Loss instances are used as defaults in Losses and jsonargparse (>=4.4x) converts dataclass defaults via vars()
+@dataclass(frozen=True)
 class Loss:
     active: bool = True
     weight: float = 1.0

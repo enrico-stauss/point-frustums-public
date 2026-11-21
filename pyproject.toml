@@ -3,20 +3,21 @@ name = "point-frustums-public"
 version = "0.1.0"
 description = "Add your description here"
 readme = "ReadMe.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
-    "litdata>=0.2.52",
+    "litdata>=0.2.76",
     "loguru>=0.7.3",
-    "numpy==2.3.2",
+    "numpy==2.5.5",
     "pandas>=2.3.1",
-    "pot[backend-torch]>=0.9.5",
+    "pot[backend-torch]>=0.9.7",
+    "prettytable>=3.19.0",
     "python-dotenv>=1.1.1",
-    "pytorch-lightning[extra]>=2.5.3",
+    "pytorch-lightning[extra]>=2.6.6",
     "pyyaml>=6.0.2",
     "tensorboard>=2.20.0",
-    "torch==2.8.0",
-    "torchmetrics>=1.8.1",
-    "torchvision>=0.23.0",
+    "torch==2.15.0",
+    "torchmetrics>=1.9.0",
+    "torchvision>=0.29.2",
     "wandb>=0.21.1",
 ]
 
@@ -33,6 +34,12 @@ ndk = [
 ]
 
 
+[tool.uv]
+# nuscenes-devkit 1.1.11 pins shapely<2, which has no Python 3.14 wheels and fails to build. Shapely is only used in
+# nuscenes.map_expansion (not used here); devkit 1.2.0 is shapely-2 compatible but adds numpy<2, so stay on 1.1.11.
+# It also caps matplotlib<3.6 which has no Python 3.14 wheels either; matplotlib is only used for rendering there.
+override-dependencies = ["shapely>=2.1", "matplotlib>=3.10"]
+
 [project.scripts]
 point-frustums = "point_frustums.__main__:main"
 
@@ -48,8 +55,8 @@ point_frustums = ["*.dll", "*.dylib", "*.so", "**/*.so"]
 requires = [
     "setuptools>=61.0",
     "wheel",
-    "numpy==2.3.2",
-    "torch==2.8.0",
+    "numpy==2.5.5",
+    "torch==2.15.0",
     "ninja"
 ]
 build-backend = "setuptools.build_meta"

@@ -15,6 +15,7 @@ from nuscenes.utils.geometry_utils import transform_matrix
 from nuscenes.utils.splits import create_splits_scenes
 from pyquaternion import Quaternion
 from pytorch_lightning import LightningDataModule
+from torch.utils._pytree import tree_map_only
 from torch.utils.data import DataLoader, Dataset, default_collate
 from torchvision.io import read_image
 
@@ -600,6 +601,9 @@ class NuScenesStreamingDataset(StreamingDataset):
 
     def __getitem__(self, index):
         data = super().__getitem__(index)
+        # litdata deserializes tensors as zero-copy views into the read-only memory-mapped chunk file; the in-place
+        # augmentations (and any later in-place OP) would crash with SIGBUS when writing to them, so copy them first.
+        data = tree_map_only(torch.Tensor, torch.clone, data)
         # Apply augmentation to data and targets
         if self.augmentations is not None:
             with torch.inference_mode():
