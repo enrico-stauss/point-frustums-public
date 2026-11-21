@@ -397,6 +397,10 @@ class NuScenes(Dataset):
                 data_record_next = self.db.get("sample_data", data_record_current["next"])
                 ego_pose_next = self.db.get("ego_pose", data_record_next["ego_pose_token"])
                 velocity = self.interpolate_velocity(ego_pose_current, ego_pose_next)
+            if velocity is not None:
+                # The interpolation yields the velocity in the global COOS, rotate it into the EGO COOS (in which the
+                # CAN velocity and the targets are provided)
+                velocity = Quaternion(ego_pose_current["rotation"]).inverse.rotate(velocity).astype(np.float32)
 
         # Set the velocity to a dummy value
         if velocity is None:
