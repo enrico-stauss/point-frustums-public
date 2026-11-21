@@ -1,4 +1,5 @@
 import os
+from enum import Enum
 from collections.abc import Mapping, MutableMapping, Sequence
 from functools import lru_cache, cached_property
 from functools import partial
@@ -24,6 +25,13 @@ from litdata import StreamingDataset, StreamingDataLoader, optimize
 from point_frustums import ROOT_DIR
 from point_frustums.augmentations import Augmentation, RandomAugmentation
 from point_frustums.config_dataclasses.dataset import DatasetConfig, Sensor
+from point_frustums.dataloaders.sampling import (
+    IndexedStreamingDataset,
+    SamplingConfig,
+    count_targets_streaming,
+    num_streaming_items,
+    weighted_sampler,
+)
 from point_frustums.geometry.boxes import transform_boxes
 from point_frustums.geometry.quaternion import quaternion_to_rotation_matrix
 from point_frustums.geometry.utils import cart_to_sph_numpy
@@ -199,6 +207,33 @@ class NuScenes(Dataset):
 
         return {"translation": translation, "rotation": rotation}
 
+    def relevant_label(self, sample_annotation: Mapping) -> Optional[Enum]:
+        """
+        Return the class label of an annotation if it is to be used as target, else None. This is the single source of
+        truth for which annotations become targets (used by get_targets and by the class counts for weighted sampling).
+        :param sample_annotation: A record of the sample_annotation table
+        :return:
+        """
+        visibility = self.db.get("visibility", sample_annotation["visibility_token"])["level"]
+        if VISIBILITY_LEVELS[visibility] <= self.dataset.annotations.visibility:
+            # The visibility of the object is below the threshold
+            return None
+        # None if the class is not in the list of classes to be considered
+        return self.dataset.annotations.retrieve_class(sample_annotation["category_name"])
+
+    def count_targets(self) -> torch.Tensor:
+        """
+        Count the targets per class in each sample without loading any sensor data.
+        :return: Tensor of shape [N_samples, N_classes] in the order of self.sample_tokens
+        """
+        counts = torch.zeros((len(self), self.dataset.annotations.n_classes), dtype=torch.int64)
+        for i, sample_token in enumerate(self.sample_tokens):
+            for annotation_token in self.db.get("sample", sample_token)["anns"]:
+                label = self.relevant_label(self.db.get("sample_annotation", annotation_token))
+                if label is not None:
+                    counts[i, label.value] += 1
+        return counts
+
     def get_targets(  # pylint: disable=too-many-locals
         self,
         sample: Mapping,
@@ -231,13 +266,8 @@ class NuScenes(Dataset):
             # boxes for intermediate frames.
             sample_annotation = self.db.get("sample_annotation", box.token)
 
-            label = self.dataset.annotations.retrieve_class(box.name)
-            visibility = self.db.get("visibility", sample_annotation["visibility_token"])["level"]
-            if VISIBILITY_LEVELS[visibility] <= self.dataset.annotations.visibility:
-                # The visibility of the object is below the threshold
-                continue
+            label = self.relevant_label(sample_annotation)
             if label is None:
-                # The label is not in the list of classes to be considered
                 continue
 
             # Add velocity information
@@ -686,10 +716,16 @@ class NuScenesDataModule(LightningDataModule):
         pin_memory: bool = False,
         persistent_workers: bool = False,
         drop_last: bool = True,
+        sampling: Optional[SamplingConfig] = None,
         **dataloader_kwargs,
     ):
+        """
+        :param sampling: Weighted sampling of the training frames (see point_frustums.dataloaders.sampling); if None,
+            the training frames are shuffled.
+        """
         super().__init__()
         self.dataset = dataset
+        self.sampling = sampling
         self.augmentations = augmentations
         self.predict_split = predict_split
         self.streaming_data_root = (
@@ -702,6 +738,10 @@ class NuScenesDataModule(LightningDataModule):
         self.pin_memory = pin_memory
         self.persistent_workers = persistent_workers
         self.drop_last = drop_last
+        # The CLI exposes all DataLoader arguments through the kwargs; the sampling is controlled by the datamodule
+        for key in ("sampler", "batch_sampler"):
+            if dataloader_kwargs.pop(key, None) is not None:
+                raise ValueError(f"`{key}` is set by the datamodule, configure the training sampling via `sampling`.")
         self.dataloader_kwargs = dataloader_kwargs
 
         self.data_root = data_root_getter(
@@ -772,6 +812,9 @@ class NuScenesDataModule(LightningDataModule):
             augmentations=self.augmentations.get("train"),
             split="train",
         )
+        sampler = None
+        if self.sampling is not None:
+            sampler = weighted_sampler(dataset.count_targets(), self.sampling, self.dataset.annotations.class_aliases)
         collate_fn = partial(partial_collate_fn, sensors=self.dataset.sensors, load_annotations=True)
         dataloader = DataLoader(
             dataset=dataset,
@@ -779,7 +822,8 @@ class NuScenesDataModule(LightningDataModule):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             persistent_workers=self.persistent_workers,
-            shuffle=True,
+            shuffle=sampler is None,
+            sampler=sampler,
             drop_last=self.drop_last,
             pin_memory=self.pin_memory,
             **self.dataloader_kwargs,
@@ -856,13 +900,29 @@ class NuScenesDataModule(LightningDataModule):
         )
         return dataloader
 
-    def train_dataloader_streaming(self) -> StreamingDataLoader:
+    def train_dataloader_streaming(self) -> StreamingDataLoader | DataLoader:
+        input_dir = os.path.join(self.streaming_data_root, "train")
         dataset = NuScenesStreamingDataset(
             augmentations=self.augmentations.get("train"),
-            input_dir=os.path.join(self.streaming_data_root, "train"),
+            input_dir=input_dir,
             max_cache_size=self.streaming_cache_size,
         )
         collate_fn = partial(partial_collate_fn, sensors=self.dataset.sensors, load_annotations=True)
+        if self.sampling is not None:
+            # The StreamingDataLoader does not support samplers; use random access through a map-style view instead.
+            # The counts are in the order of the litdata indices (which differs from the order of the sample tokens).
+            counts = count_targets_streaming(input_dir, n_classes=self.dataset.annotations.n_classes)
+            return DataLoader(
+                dataset=IndexedStreamingDataset(dataset, length=num_streaming_items(input_dir)),
+                collate_fn=collate_fn,
+                batch_size=self.batch_size,
+                num_workers=self.num_workers,
+                persistent_workers=self.persistent_workers,
+                sampler=weighted_sampler(counts, self.sampling, self.dataset.annotations.class_aliases),
+                drop_last=self.drop_last,
+                pin_memory=self.pin_memory,
+                **self.dataloader_kwargs,
+            )
         dataloader = StreamingDataLoader(
             dataset=dataset,
             collate_fn=collate_fn,

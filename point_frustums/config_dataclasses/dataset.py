@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from enum import Enum
 from functools import cached_property
 from itertools import chain
@@ -32,6 +32,11 @@ class Annotations:
         :return:
         """
         return asdict(self)
+
+    def __getstate__(self):
+        # Only pickle the fields: the cached label enums are created dynamically and cannot be pickled (e.g. when the
+        # dataset is sent to DataLoader worker processes); all cached properties are recreated lazily after unpickling.
+        return {f.name: getattr(self, f.name) for f in fields(self)}
 
     @cached_property
     def classes(self) -> Labels:
