@@ -36,6 +36,7 @@ from point_frustums.geometry.boxes import transform_boxes
 from point_frustums.geometry.quaternion import quaternion_to_rotation_matrix
 from point_frustums.geometry.utils import cart_to_sph_numpy
 from point_frustums.utils.custom_types import Targets
+from point_frustums.utils import storage
 from point_frustums.utils.environment_helpers import data_root_getter
 
 VISIBILITY_LEVELS = {
@@ -185,6 +186,26 @@ class NuScenes(Dataset):
         else:
             raise AttributeError
         return scenes
+
+    def required_files(self, i: int) -> list[str]:
+        """
+        The sensor data files that loading sample i reads (all active sensors, including the previous lidar sweeps).
+        :param i: The sample index
+        :return:
+        """
+        sample = self.db.get("sample", self.sample_tokens[i])
+        files = []
+        for sensor, specifications in self.dataset.sensors.items():
+            if not specifications.active:
+                continue
+            sample_data_token = sample["data"][sensor]
+            n_files = specifications.sweeps if specifications.modality == "lidar" else 1
+            for _ in range(n_files):
+                files.append(self.db.get_sample_data_path(sample_data_token))
+                sample_data_token = self.db.get("sample_data", sample_data_token)["prev"]
+                if sample_data_token == "":
+                    break
+        return files
 
     def get_data(self, modality: str, sample: Mapping, sensor: str) -> torch.Tensor:
         if modality == "camera":
@@ -728,9 +749,10 @@ class NuScenesDataModule(LightningDataModule):
         self.sampling = sampling
         self.augmentations = augmentations
         self.predict_split = predict_split
-        self.streaming_data_root = (
-            os.path.abspath(os.path.expanduser(streaming_data_root)) if streaming_data_root is not None else None
-        )
+        if streaming_data_root is not None and not storage.is_remote(streaming_data_root):
+            streaming_data_root = os.path.abspath(os.path.expanduser(streaming_data_root))
+        # Local directory or remote URL (s3://..., see point_frustums.utils.storage)
+        self.streaming_data_root = streaming_data_root
         self.streaming_chunk_size = streaming_chunk_size
         self.streaming_cache_size = streaming_cache_size
         self.batch_size = batch_size
@@ -758,46 +780,74 @@ class NuScenesDataModule(LightningDataModule):
         version = self.dataset.version.rsplit("-")[0] + "-test"
         return NuScDB(version=version, dataroot=self.data_root, verbose=False)
 
-    def _optimize_split(self, output_dir, split: Literal["train", "val", "test"]):
-        os.makedirs(output_dir)
-        logger.info(f"Optimizing the {split} split of the NuScenes dataset into the directory {output_dir}")
-        load_annotations = split in ("train", "val")
-        if split == "test":
-            database = self.nuscenes_database_test
-        else:
-            database = self.nuscenes_database
-
-        dataset = NuScenes(
-            db=database,
+    def nuscenes_split(self, split: Literal["train", "val", "test"]) -> "NuScenes":
+        """The NuScenes dataset of a split as it is stored in the optimized (streaming) format."""
+        return NuScenes(
+            db=self.nuscenes_database_test if split == "test" else self.nuscenes_database,
             dataset=self.dataset,
-            load_annotations=load_annotations,
+            load_annotations=split in ("train", "val"),
             augmentations=None,
             split=split,
         )
 
+    def optimize_split(
+        self,
+        output_dir: str,
+        split: Literal["train", "val", "test"],
+        indices: Optional[Sequence[int]] = None,
+        append: bool = False,
+        num_workers: Optional[int] = None,
+        chunk_bytes: Optional[int | str] = None,
+    ) -> list[str]:
+        """
+        Optimize (a subset of) the samples of a split into the litdata format.
+
+        The items are stored in the order of the provided indices (with any number of workers and across appends), so
+        that per-item information (e.g. the target counts for weighted sampling) can be derived without reading the
+        optimized data.
+        :param output_dir: Local directory or remote URL (s3://...)
+        :param split:
+        :param indices: The sample indices to process, defaults to all samples of the split
+        :param append: Append to an existing optimized dataset in output_dir
+        :param num_workers: Defaults to the number of CPUs
+        :param chunk_bytes: Chunk the data by size instead of by the number of items (streaming_chunk_size)
+        :return: The sample tokens of the stored items, in the order of the litdata indices
+        """
+        dataset = self.nuscenes_split(split)
+        indices = list(range(len(dataset))) if indices is None else list(indices)
+        logger.info(f"Optimizing {len(indices)} samples of the {split} split of the NuScenes dataset into {output_dir}")
+        if not storage.is_remote(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
         optimize(
             fn=dataset.__getitem__,
-            inputs=list(range(len(dataset))),
+            inputs=indices,
             output_dir=output_dir,
-            chunk_size=self.streaming_chunk_size,
-            num_workers=max(1, os.cpu_count()),
+            chunk_size=None if chunk_bytes is not None else self.streaming_chunk_size,
+            chunk_bytes=chunk_bytes,
+            num_workers=num_workers or max(1, os.cpu_count()),
+            mode="append" if append else None,
+            keep_data_ordered=True,
+            reorder_files=False,
         )
+        return [dataset.sample_tokens[i] for i in indices]
 
     def prepare_data(self) -> None:
         if self.streaming_data_root is not None:
-            os.makedirs(self.streaming_data_root, exist_ok=True)
-            if not os.path.exists(train_dir := os.path.join(self.streaming_data_root, "train")):
-                # Create the optimized version of the train split
-                self._optimize_split(output_dir=train_dir, split="train")
-
-            if not os.path.exists(val_dir := os.path.join(self.streaming_data_root, "val")):
-                # Create the optimized version of the val split
-                self._optimize_split(output_dir=val_dir, split="val")
-
-            if not os.path.exists(test_dir := os.path.join(self.streaming_data_root, "test")):
-                # Create the optimized version of the val split
-                if not self.dataset.version == "v1.0-mini":
-                    self._optimize_split(output_dir=test_dir, split="test")
+            splits = ["train", "val"] if self.dataset.version == "v1.0-mini" else ["train", "val", "test"]
+            if storage.is_remote(self.streaming_data_root):
+                # Remote datasets are built incrementally with point_frustums.dataloaders.build_streaming
+                for split in ("train", "val"):
+                    if not storage.exists(storage.join(self.streaming_data_root, split, "index.json")):
+                        raise FileNotFoundError(
+                            f"No optimized {split} split in {self.streaming_data_root}; build it with "
+                            "point_frustums.dataloaders.build_streaming."
+                        )
+            else:
+                os.makedirs(self.streaming_data_root, exist_ok=True)
+                for split in splits:
+                    if not os.path.exists(split_dir := os.path.join(self.streaming_data_root, split)):
+                        # Create the optimized version of the split
+                        self.optimize_split(output_dir=split_dir, split=split)
 
             self.train_dataloader = self.train_dataloader_streaming
             self.val_dataloader = self.val_dataloader_streaming
@@ -901,7 +951,7 @@ class NuScenesDataModule(LightningDataModule):
         return dataloader
 
     def train_dataloader_streaming(self) -> StreamingDataLoader | DataLoader:
-        input_dir = os.path.join(self.streaming_data_root, "train")
+        input_dir = storage.join(self.streaming_data_root, "train")
         dataset = NuScenesStreamingDataset(
             augmentations=self.augmentations.get("train"),
             input_dir=input_dir,
@@ -939,7 +989,7 @@ class NuScenesDataModule(LightningDataModule):
     def val_dataloader_streaming(self) -> StreamingDataLoader:
         dataset = NuScenesStreamingDataset(
             augmentations=self.augmentations.get("val"),
-            input_dir=os.path.join(self.streaming_data_root, "val"),
+            input_dir=storage.join(self.streaming_data_root, "val"),
             max_cache_size=self.streaming_cache_size,
         )
         collate_fn = partial(partial_collate_fn, sensors=self.dataset.sensors, load_annotations=True)
@@ -959,7 +1009,7 @@ class NuScenesDataModule(LightningDataModule):
     def test_dataloader_streaming(self) -> StreamingDataLoader:
         dataset = NuScenesStreamingDataset(
             augmentations=self.augmentations.get("test"),
-            input_dir=os.path.join(self.streaming_data_root, "test"),
+            input_dir=storage.join(self.streaming_data_root, "test"),
             max_cache_size=self.streaming_cache_size,
         )
         collate_fn = partial(partial_collate_fn, sensors=self.dataset.sensors, load_annotations=False)
@@ -979,7 +1029,7 @@ class NuScenesDataModule(LightningDataModule):
     def predict_dataloader_streaming(self) -> StreamingDataLoader:
         dataset = NuScenesStreamingDataset(
             augmentations=self.augmentations.get("val"),
-            input_dir=os.path.join(self.streaming_data_root, "val"),
+            input_dir=storage.join(self.streaming_data_root, "val"),
             max_cache_size=self.streaming_cache_size,
         )
         collate_fn = partial(partial_collate_fn, sensors=self.dataset.sensors, load_annotations=False)
