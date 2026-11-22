@@ -177,4 +177,10 @@ class ConfigTransformerFrustumEncoder:
     n_channels_projection: int
     n_heads: int = 1
     n_encoders: int = 1
+    # Optional upper bound of the points per frustum that enter the encoder (the attention is exact for all points
+    # otherwise; its compute grows quadratically with the points per frustum, its memory only linearly)
+    max_points_per_frustum: Optional[int] = None
+    forward_expansion: int = 4
     dropout: float = 0.1
+    # Recompute the activations of the encoder blocks in the backward pass (less memory, more compute)
+    checkpointing: bool = False
