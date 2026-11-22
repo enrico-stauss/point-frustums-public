@@ -60,7 +60,7 @@ def symmetrize_mean(  # pylint: disable=too-many-arguments
     context: Dict[str, torch.Tensor],
 ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """
-    Compute the mean via the torch.scatter_add_ OP as method to compute the frustum-wise sum.
+    Compute the mean via the torch.index_add OP as method to compute the frustum-wise sum.
     :param pc:
     :param n_frustums:
     :param i_frustum:
@@ -73,15 +73,12 @@ def symmetrize_mean(  # pylint: disable=too-many-arguments
     if "mean" in context:
         return context["mean"], context
 
-    n_points, n_channels = pc.shape
-    # Prepare the output tensor and the index tensor for the scatter op
-    i_frustum = i_frustum[:, None].expand(n_points, n_channels)
-    # Initialize the output tensor with zeros and fill by the maximum value per frustum
-    mean = pc.new_zeros((n_frustums, n_channels))
-    mean = torch.scatter_add(input=mean, dim=0, index=i_frustum, src=pc)
+    n_channels = pc.shape[1]
+    # index_add instead of scatter_add: on MPS, scatter_add with sorted (hence clustered) indices is >10x slower
+    mean = pc.new_zeros((n_frustums, n_channels)).index_add(0, i_frustum, pc)
 
-    mask = counts_padded != 0
-    mean[mask, :] = mean[mask, :].div(counts_padded[mask, None])
+    # Empty frustums have a sum of zero; dividing by the clamped count avoids boolean indexing (a device sync)
+    mean = mean.div(counts_padded.clamp(min=1)[:, None])
 
     context["mean"] = mean
     return mean, context
@@ -98,7 +95,7 @@ def symmetrize_std(  # pylint: disable=too-many-arguments
     context: Dict[str, torch.Tensor],
 ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     """
-    Compute the std via the torch.scatter_add OP as method to compute the frustum-wise sum.
+    Compute the std via the torch.index_add OP as method to compute the frustum-wise sum.
     :param pc:
     :param n_frustums:
     :param i_frustum:
@@ -121,18 +118,16 @@ def symmetrize_std(  # pylint: disable=too-many-arguments
             context=context,
         )
     mean = context["mean"]
-    n_points, n_channels = pc.shape
+    n_channels = pc.shape[1]
 
-    pc = pc.sub(mean[i_unique, :][i_inv, :])
+    pc = pc.sub(mean[i_frustum, :])
     pc = pc.square()
 
-    std = pc.new_zeros((n_frustums, n_channels))
-    std = torch.scatter_add(input=std, dim=0, index=i_frustum[:, None].expand(n_points, n_channels), src=pc)
-
-    mask = torch.ne(counts_padded, 0)
-    std[mask, :] = std[mask, :].div(counts_padded[mask, None])
-    mask = torch.gt(std, 0.0)
-    std[mask] = std[mask].sqrt()
+    variance = pc.new_zeros((n_frustums, n_channels)).index_add(0, i_frustum, pc)
+    variance = variance.div(counts_padded.clamp(min=1)[:, None])
+    # The square root is only differentiable for a positive variance, a zero variance gets a zero gradient
+    positive = variance > 0
+    std = torch.where(positive, torch.sqrt(torch.where(positive, variance, torch.ones_like(variance))), 0.0)
 
     context["std"] = std
     return std, context
