@@ -1,15 +1,11 @@
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from functools import cached_property
-from math import isclose
 from typing import Optional, Literal, Dict
 
 import torch
+import torch.utils.checkpoint
 from torch import nn
-
-if sys.platform != "darwin":  # "darwin" is macOS
-    from xformers.ops.fmha import attn_bias, memory_efficient_attention  # NOQA
 
 from point_frustums.config_dataclasses.point_frustums import (
     ConfigDiscretize,
@@ -18,6 +14,7 @@ from point_frustums.config_dataclasses.point_frustums import (
     ConfigReduce,
     ConfigTransformerFrustumEncoder,
 )
+from point_frustums.ops.segment_attention import segment_attention, segment_softmax_pooling
 
 
 @torch.jit.script
@@ -162,16 +159,23 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
         n_channels_projection: int,
         n_heads: int = 1,
         n_encoders: int = 1,
+        max_points_per_frustum: int | None = None,
         forward_expansion: int = 4,
         dropout: float = 0.1,
+        checkpointing: bool = False,
     ):
         """
         Enrich points with information from the local context by applying a sequence of n encoder blocks. The
         semantically richer pointcloud is then projected to the output space and reduced to a pseudo-image by applying
         cross attention with a learnable query/decoder parameter.
 
-        The TransformerFrustumEncoder makes extensive use of the xFormers library to reduce the memory and compute
-        footprint of the self attention mechanism.
+        Attention is restricted to the points within a frustum (block-diagonal attention). It is evaluated exactly on the
+        packed points, without padding and without storing the attention matrix (point_frustums.ops.segment_attention,
+        a kernel for CPU, CUDA and MPS), so the memory is linear in the number of points regardless of how unevenly
+        they are distributed over the frustums. The cross attention of the row queries reduces each frustum with a
+        segment softmax.
+        Optionally, at most max_points_per_frustum points per frustum enter the encoder: a random subset during
+        training, an evenly spaced one otherwise.
         :param n_splits_azi:
         :param n_splits_pol:
         :param n_channels_in:
@@ -179,11 +183,15 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
         :param n_channels_projection:
         :param n_heads:
         :param n_encoders:
+        :param max_points_per_frustum:
         :param forward_expansion:
         :param dropout:
+        :param checkpointing: Recompute the activations of the encoder blocks in the backward pass instead of storing
+            them; these dominate the memory (several per point and channel) while being cheap to evaluate.
         """
         super().__init__()
 
+        self.checkpointing = checkpointing
         self.n_splits_azi = n_splits_azi
         self.n_splits_pol = n_splits_pol
         self.n_splits = n_splits_azi * n_splits_pol
@@ -194,105 +202,131 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
 
         self.n_heads = n_heads
         self.n_encoders = n_encoders
+        self.max_points_per_frustum = max_points_per_frustum
         self.forward_expansion = forward_expansion
         self.dropout = dropout
 
+        assert self.n_channels_embedding % self.n_heads == 0, "Embedding dimension not divisible by `n_heads`."
         self.n_channels_per_head = self.n_channels_embedding // self.n_heads
-        assert isclose(self.n_channels_embedding % self.n_heads, 0), "Embedding dimension not divisible by `n_heads`."
+        assert self.n_channels_per_head in (4, 8, 16, 32, 64), "The channels per head must be one of 4, 8, 16, 32, 64."
 
         self.fc_pre = None
         if self.n_channels_in != self.n_channels_embedding:
             self.fc_pre = nn.Linear(self.n_channels_in, self.n_channels_embedding)
 
-        # TODO: The below could be merged into a Sequential of modules if it were not for the mask (Sequential allows
-        #  only one input arg) -> Put it in a tuple?
-        self.qvk_self_attention = nn.ModuleList()
+        self.qkv_self_attention = nn.ModuleList()
+        self.out_self_attention = nn.ModuleList()
         self.ffn_self_attention = nn.ModuleList()
         self.norm_self_attention = nn.ModuleList()
         for _ in range(self.n_encoders):
-            self.qvk_self_attention.append(nn.Linear(self.n_channels_per_head, 3 * self.n_channels_per_head))
-            self.ffn_self_attention.append(self.FeedForward(n_channels=self.n_channels_per_head, dropout=dropout))
-            self.norm_self_attention.append(nn.LayerNorm(self.n_channels_per_head))
+            self.qkv_self_attention.append(nn.Linear(self.n_channels_embedding, 3 * self.n_channels_embedding))
+            self.out_self_attention.append(nn.Linear(self.n_channels_embedding, self.n_channels_embedding))
+            self.ffn_self_attention.append(
+                self.FeedForward(self.n_channels_embedding, expansion_factor=forward_expansion, dropout=dropout)
+            )
+            self.norm_self_attention.append(nn.LayerNorm(self.n_channels_embedding))
 
+        self.norm_cross_attention = nn.LayerNorm(self.n_channels_embedding)
         self.kv_cross_attention = nn.Linear(self.n_channels_embedding, 2 * self.n_channels_projection)
-        self.decoder = nn.Parameter(torch.empty(1, self.n_splits_pol, 1, self.n_channels_projection))
-        self.ffn_cross_attention = self.FeedForward(n_channels=self.n_channels_projection, dropout=dropout)
-        self.norm_cross_attention = nn.LayerNorm(self.n_channels_projection)
+        # One learnable query per row of the featuremap (the encoding is azimuth invariant)
+        self.decoder = nn.Parameter(torch.empty(self.n_splits_pol, self.n_channels_projection))
+        nn.init.normal_(self.decoder, std=0.02)
+        self.ffn_cross_attention = self.FeedForward(
+            self.n_channels_projection, expansion_factor=forward_expansion, dropout=dropout
+        )
+
+    def _select_points(self, i_inv: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
+        """
+        Select at most max_points_per_frustum points per frustum.
+        :param i_inv: The index of the (nonempty) frustum of each point, the points are sorted by frustum [N]
+        :param counts: The number of points per nonempty frustum [I]
+        :return: The indices of the selected points, still sorted by frustum [S]
+        """
+        n_points, n_max = i_inv.shape[0], self.max_points_per_frustum
+        # The position of each point within its frustum
+        position = torch.arange(n_points, device=i_inv.device) - (torch.cumsum(counts, dim=0) - counts)[i_inv]
+        if self.training:
+            # Shuffle the points within their frustum: sort by the frustum index plus a random fraction. The points
+            # remain grouped by frustum, hence keep their positions; the first max_points_per_frustum are selected.
+            point_index = torch.sort(i_inv.float() + torch.rand(n_points, device=i_inv.device)).indices
+            return point_index[position < n_max]
+        # Evenly spaced subset: every stride-th point of a frustum
+        stride = (counts.float() / n_max).clamp(min=1.0)[i_inv]
+        selected = (torch.remainder(position.float(), stride) < 1.0) & (position.float() < stride * n_max)
+        return torch.nonzero(selected).squeeze(-1)
+
+    def _encoder_block(  # pylint: disable=too-many-arguments
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        segment_ids: torch.Tensor,
+        i_encoder: int,
+        dropout_p: float,
+    ) -> torch.Tensor:
+        n_points = x.shape[0]
+        qkv, out = self.qkv_self_attention[i_encoder], self.out_self_attention[i_encoder]
+        # [N, 3E] -> 3 x [N, H, D]
+        q, k, v = (
+            qkv(self.norm_self_attention[i_encoder](x))
+            .reshape(n_points, 3, self.n_heads, self.n_channels_per_head)
+            .unbind(1)
+        )
+        attention = segment_attention(q, k, v, cu_seqlens=cu_seqlens, segment_ids=segment_ids, dropout_p=dropout_p)
+        x = out(attention.reshape(n_points, self.n_channels_embedding)) + x
+        return self.ffn_self_attention[i_encoder](x)
 
     def forward(  # pylint: disable=too-many-locals
         self,
         pc: torch.Tensor,
         i_unique: torch.Tensor,
-        counts: list[int],
+        i_inv: torch.Tensor,
+        counts: torch.Tensor,
     ) -> torch.Tensor:
         """
         Enrich the pointcloud with the local context and then apply a reduction to the pseudo-image by performing cross
         attention with the decoder query parameter.
-
-        The cross attention mechanism is equivalent to feeding the pointcloud through a linear layer without bias and
-        subsequently applying average pooling within frustums. One notable detail is, that the implemented algorithm is
-        azimuth-invariant but uses a distinct projection space for the polar dimension (rows).
-        :param pc:
-        :param i_unique:
-        :param counts:
-        :return:
+        :param pc: The (decorated) pointcloud, sorted by frustum [N, F]
+        :param i_unique: The indices of the nonempty frustums [I]
+        :param i_inv: The index into i_unique for each point [N]
+        :param counts: The number of points per nonempty frustum [I]
+        :return: The featuremap [M, L] (M = n_splits)
         """
         # For brevity, the comments use:
-        #   N := n_points
-        #   M := n_frustums
-        #   I := len(i_unique) (less than M, the number of non-empty frustums)
-        #   P := n_splits_pol
-        #   H := n_heads
-        #   F := n_channels_in
-        #   E := n_channels_embedding
-        #   K := n_channels_per_head
-        #   L := n_channels_projection
-        n_points, _ = pc.shape
-        # Apply preceding layer to pointcloud to get the correct embedding size s.t. residual connections are possible.
+        #   N := n_points, I := n_nonempty_frustums, M := n_frustums
+        #   H := n_heads, D := n_channels_per_head, E := n_channels_embedding, L := n_channels_projection
         if self.fc_pre is not None:
             pc = self.fc_pre(pc)
 
-        # SELF ATTENTION (THE POINTCLOUD IS ENRICHED WITH THE FRUSTUM CONTEXT)
-        # Create BlockDiagonalMask to perform sparse self attention
-        mask = attn_bias.BlockDiagonalMask.from_seqlens(counts, counts)
+        x, segment_ids = pc, i_inv
+        if self.max_points_per_frustum is not None and int(counts.max()) > self.max_points_per_frustum:
+            point_index = self._select_points(i_inv, counts)
+            x, segment_ids = pc[point_index], i_inv[point_index]
+            counts = counts.clamp(max=self.max_points_per_frustum)
+        n_points, n_frustums = x.shape[0], counts.shape[0]
+        cu_seqlens = torch.nn.functional.pad(torch.cumsum(counts, dim=0), (1, 0))
+        dropout_p = self.dropout if self.training else 0.0
 
-        # Preprocess PC dimension for encoder blocks to be explicit w.r.t. the number of heads [1, N, H, K]
-        pc = pc.reshape([1, n_points, self.n_heads, self.n_channels_per_head])
+        # SELF ATTENTION (THE POINTS ARE ENRICHED WITH THE CONTEXT OF THEIR FRUSTUM)
+        for i_encoder in range(self.n_encoders):
+            if self.checkpointing and self.training and torch.is_grad_enabled():
+                # The CPU RNG state is restored on recomputation, hence the same dropout seed is drawn
+                x = torch.utils.checkpoint.checkpoint(
+                    self._encoder_block, x, cu_seqlens, segment_ids, i_encoder, dropout_p, use_reentrant=False
+                )
+            else:
+                x = self._encoder_block(x, cu_seqlens, segment_ids, i_encoder, dropout_p)
 
-        # Iteratively feed PC through layers
-        for qkv, ffn, norm in zip(self.qvk_self_attention, self.ffn_self_attention, self.norm_self_attention):
-            # Normalize and then encode PC as query, key and value [1, N, H, K]
-            q, k, v = qkv(norm(pc)).reshape([1, n_points, self.n_heads, 3, self.n_channels_per_head]).unbind(-2)
-            # Evaluate self-attention and residual connection [1, N, H, K]
-            pc = memory_efficient_attention(query=q, key=k, value=v, attn_bias=mask, p=self.dropout) + pc
-            # Apply FFN (norm, fully connected network, residual connection, dropout)
-            pc = ffn(pc)
-        # Stack heads
-        pc = pc.reshape([1, n_points, self.n_channels_embedding])
-
-        # CROSS ATTENTION (DECODER QUERIES THE ENRICHED POINTCLOUD)
-        # Create BlockDiagonalMask that links nonempty frustums to all the points assigned to the latter.
-        mask = attn_bias.BlockDiagonalMask.from_seqlens(len(i_unique) * [1], counts)
-        # Normalize and then encode PC as key and value [1, N, 1, L]
-        k, v = (
-            self.kv_cross_attention(self.norm_cross_attention(pc))
-            .reshape([1, n_points, 1, 2, self.n_channels_projection])
-            .unbind(-2)
+        # CROSS ATTENTION (THE ROW QUERY ATTENDS TO THE ENRICHED POINTS OF EACH FRUSTUM)
+        # [N, 2L] -> 2 x [N, 1, L]
+        k, v = self.kv_cross_attention(self.norm_cross_attention(x)).reshape(n_points, 2, 1, -1).unbind(1)
+        # The query of each nonempty frustum is the one of its row [I, 1, L]
+        query = self.decoder[torch.div(i_unique, self.n_splits_azi, rounding_mode="floor")][:, None, :]
+        attention = segment_softmax_pooling(
+            query, k, v, segment_ids=segment_ids, n_segments=n_frustums, dropout_p=dropout_p, training=self.training
         )
-        # Initialize output tensor with zeros
-        feats = pc.new_zeros((self.n_frustums, self.n_channels_projection))
-        # Repeat the first dimension of the decoder so that it can be indexed with the global frustum index (row-major)
-        # [1, P, 1, L] -> [1, M, 1, L]
-        # https://discuss.pytorch.org/t/repeat-a-nn-parameter-for-efficient-computation/25659/6
-        decoder = self.decoder.repeat(1, self.n_splits_azi, 1, 1)
-        # Index-select to keep only the parameters corresponding to non-empty frustums [1, M, 1, L] -> [1, I, 1, L]
-        decoder = decoder[:, i_unique, :, :]  # pylint: disable=unsubscriptable-object
-        # Evaluate cross-attention and residual connection
-        # Query: [1, I, 1, L] | Key, Value: [1, N, 1, L] -> Attention Matrix: [I, N] -> Output: [1, I, 1, L]
-        out = memory_efficient_attention(query=decoder, key=k, value=v, attn_bias=mask, p=self.dropout)
-        # Index-put the output of the cross attention into the output tensor [1, I, 1, L] -> [1, M, 1, L]
-        feats[i_unique, :] = (out + decoder)[0, :, 0, :]  # TODO: Discuss whether this residual connection is sensible
 
+        feats = pc.new_zeros((self.n_splits, self.n_channels_projection))
+        feats[i_unique, :] = (attention + query)[:, 0, :]
         # Apply feed forward network (norm, fully connected network, residual connection, dropout)
         return self.ffn_cross_attention(feats)
 
@@ -378,7 +412,12 @@ class FrustumEncoder(nn.Module):  # pylint: disable=too-many-instance-attributes
         self.dropout = dropout
 
         if self.tfe is not None:
-            self.tfe = TransformerFrustumEncoder(**asdict(self.tfe))
+            self.tfe = TransformerFrustumEncoder(
+                n_splits_azi=self.discretize.n_splits_azi,
+                n_splits_pol=self.discretize.n_splits_pol,
+                n_channels_in=self.n_channels["decorated"],
+                **asdict(self.tfe),
+            )
 
         self.decorator_keep_channels = self.get_decorator_keep_channels()
 
@@ -558,7 +597,7 @@ class FrustumEncoder(nn.Module):  # pylint: disable=too-many-instance-attributes
             )
         if self.tfe is not None:
             # Apply the TFE to the pc to enrich points with local context and project to output dimension
-            featuremap.append(self.tfe(pc=pc, i_unique=i_unique, counts=counts.tolist()))
+            featuremap.append(self.tfe(pc=pc, i_unique=i_unique, i_inv=i_inv, counts=counts))
 
         return torch.cat(featuremap, dim=1)
 
