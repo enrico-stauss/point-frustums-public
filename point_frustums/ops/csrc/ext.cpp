@@ -1,5 +1,6 @@
 #include "iou_box3d/iou_box3d.h"
 #include "nms/nms.h"
+#include "segment_attention/segment_attention.h"
 #include <torch/extension.h>
 
 namespace point_frustums {
@@ -76,5 +77,7 @@ TORCH_LIBRARY(point_frustums, m) {
   m.def("iou_box3d", &IoUBox3D);
   m.def("iou_box3d_pairwise", &IoUBox3DPairwise);
   m.def("nms", &NMS);
+  m.def("segment_attention_forward", &SegmentAttentionForward);
+  m.def("segment_attention_backward", &SegmentAttentionBackward);
 }
 } // namespace point_frustums

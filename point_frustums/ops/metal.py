@@ -170,3 +170,140 @@ def nms(
         boxes, meta, labels, sort_idx, is_duplicate, n, float(iou_threshold), float(distance_threshold), threads=(n, n)
     )
     return is_duplicate.logical_not()
+
+
+_SEGMENT_ATTENTION_HEADER = "segment_attention/segment_attention_utils.h"
+
+# One thread per (head, point) row, see csrc/segment_attention/segment_attention_utils.h. The rows are ordered
+# head-major, so the threads of a SIMD group mostly belong to the same segment and read the same keys.
+_SEGMENT_ATTENTION_KERNELS = """
+kernel void segment_attention_forward(
+    device const float* q [[buffer(0)]],             // (N, H, D)
+    device const float* k [[buffer(1)]],             // (N, H, D)
+    device const float* v [[buffer(2)]],             // (N, H, D)
+    device const long* segment_ids [[buffer(3)]],    // (N,)
+    device const long* cu_seqlens [[buffer(4)]],     // (S + 1,)
+    device float* out [[buffer(5)]],                 // (N, H, D)
+    device float* lse [[buffer(6)]],                 // (N, H)
+    constant long& N [[buffer(7)]],
+    constant long& H [[buffer(8)]],
+    constant float& scale [[buffer(9)]],
+    constant float& p_drop [[buffer(10)]],
+    constant long& seed [[buffer(11)]],
+    uint row [[thread_position_in_grid]]) {
+  if (row >= N * H) {
+    return;
+  }
+  const long h = row / N, i = row % N;
+  const long s = segment_ids[i];
+  segment_attention::ForwardRow<HEAD_DIM>(q, k, v, out, lse, i, h, cu_seqlens[s], cu_seqlens[s + 1], H, scale, p_drop,
+                                          static_cast<uint>(seed));
+}
+
+kernel void segment_attention_backward_query(
+    device const float* grad_out [[buffer(0)]],
+    device const float* q [[buffer(1)]],
+    device const float* k [[buffer(2)]],
+    device const float* v [[buffer(3)]],
+    device const float* lse [[buffer(4)]],
+    device const float* delta [[buffer(5)]],
+    device const long* segment_ids [[buffer(6)]],
+    device const long* cu_seqlens [[buffer(7)]],
+    device float* grad_q [[buffer(8)]],
+    constant long& N [[buffer(9)]],
+    constant long& H [[buffer(10)]],
+    constant float& scale [[buffer(11)]],
+    constant float& p_drop [[buffer(12)]],
+    constant long& seed [[buffer(13)]],
+    uint row [[thread_position_in_grid]]) {
+  if (row >= N * H) {
+    return;
+  }
+  const long h = row / N, i = row % N;
+  const long s = segment_ids[i];
+  segment_attention::BackwardQueryRow<HEAD_DIM>(grad_out, q, k, v, lse, delta, grad_q, i, h, cu_seqlens[s],
+                                                cu_seqlens[s + 1], H, scale, p_drop, static_cast<uint>(seed));
+}
+
+kernel void segment_attention_backward_key_value(
+    device const float* grad_out [[buffer(0)]],
+    device const float* q [[buffer(1)]],
+    device const float* k [[buffer(2)]],
+    device const float* v [[buffer(3)]],
+    device const float* lse [[buffer(4)]],
+    device const float* delta [[buffer(5)]],
+    device const long* segment_ids [[buffer(6)]],
+    device const long* cu_seqlens [[buffer(7)]],
+    device float* grad_k [[buffer(8)]],
+    device float* grad_v [[buffer(9)]],
+    constant long& N [[buffer(10)]],
+    constant long& H [[buffer(11)]],
+    constant float& scale [[buffer(12)]],
+    constant float& p_drop [[buffer(13)]],
+    constant long& seed [[buffer(14)]],
+    uint row [[thread_position_in_grid]]) {
+  if (row >= N * H) {
+    return;
+  }
+  const long h = row / N, j = row % N;
+  const long s = segment_ids[j];
+  segment_attention::BackwardKeyValueRow<HEAD_DIM>(grad_out, q, k, v, lse, delta, grad_k, grad_v, j, h,
+                                                   cu_seqlens[s], cu_seqlens[s + 1], H, scale, p_drop,
+                                                   static_cast<uint>(seed));
+}
+"""
+
+
+@cache
+def _segment_attention_library(head_dim: int):
+    """The kernels are compiled for every head dimension (a template parameter, so the rows fit in registers)."""
+    source = "#include <metal_stdlib>\nusing namespace metal;\n"
+    source += f"#define HEAD_DIM {head_dim}\n" + _read_header(_SEGMENT_ATTENTION_HEADER)
+    return torch.mps.compile_shader(source + _SEGMENT_ATTENTION_KERNELS)
+
+
+def segment_attention_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    segment_ids: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    scale: float,
+    dropout_p: float,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Equivalent to torch.ops.point_frustums.segment_attention_forward, returns out (N, H, D) and lse (N, H)."""
+    n, h, d = q.shape
+    out = torch.empty_like(q)
+    lse = torch.empty((n, h), dtype=q.dtype, device=q.device)
+    if n > 0:
+        _segment_attention_library(d).segment_attention_forward(
+            q, k, v, segment_ids, cu_seqlens, out, lse, n, h, float(scale), float(dropout_p), int(seed), threads=n * h
+        )
+    return out, lse
+
+
+def segment_attention_backward(  # pylint: disable=too-many-arguments
+    grad_out: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    segment_ids: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    scale: float,
+    dropout_p: float,
+    seed: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Equivalent to torch.ops.point_frustums.segment_attention_backward, returns grad_q, grad_k, grad_v."""
+    n, h, d = q.shape
+    grad_q, grad_k, grad_v = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
+    if n > 0:
+        delta = (grad_out * out).sum(-1).contiguous()
+        lib = _segment_attention_library(d)
+        args = (grad_out, q, k, v, lse, delta, segment_ids, cu_seqlens)
+        hyper = (n, h, float(scale), float(dropout_p), int(seed))
+        lib.segment_attention_backward_query(*args, grad_q, *hyper, threads=n * h)
+        lib.segment_attention_backward_key_value(*args, grad_k, grad_v, *hyper, threads=n * h)
+    return grad_q, grad_k, grad_v
