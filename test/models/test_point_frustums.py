@@ -92,11 +92,13 @@ class TestPointFrustumsLosses:
         """
         # Set the foreground_idx to decide where predictions were made
         #   -> the first index corresponds to the upper left of the pseudo image
-        #   -> The angular coordinate with the discretization of 4 azimuthal and 2 polar splits (after a stride 2
-        #      downsampling on the first layer) equals to an azimuthal position of [-3/4 pi, 70°].
-        #   -> The angular coordinates with the discretization of 2 azimuthal and 1 polar split (after a stride 4
-        #      downsampling on the second layer) equals to an azimuthal position of [-1/2 pi, 80°].
-        #   -> The first layer outputs 8 predictions 4x2, so the first index of the second layer output equals 8.
+        #   -> The input frustums are 45° (azimuthal) x 10° (polar) wide.
+        #   -> Node k of a layer with stride s is centered on the input frustum s * k (the strided convolutions sample
+        #      every s-th frustum), i.e. at the center of that frustum.
+        #   -> l0 (stride 2, 4x2 nodes): index 0 is centered on the input frustum (0, 0) at [-7/8 pi, 65°] and index 7
+        #      (row 1, column 3) on the input frustum (2, 6) at [5/8 pi, 85°].
+        #   -> l1 (stride 4, 2x1 nodes): index 8 (the first of l1) is centered on the input frustum (0, 0) at
+        #      [-7/8 pi, 65°].
         foreground_idx = torch.tensor([0, 7, 8], dtype=torch.long)
         # Create some sample predictions (relative to the frustum center) in the upper-left frustum for layer l0 and l1
         predictions = torch.tensor([[10, 0, 0], [5, 0, 0], [10, 0, 0]], dtype=torch.float)
@@ -104,9 +106,9 @@ class TestPointFrustumsLosses:
         targets = sph_to_cart_torch(
             torch.tensor(
                 [
-                    [10, torch.deg2rad(torch.tensor(70)), -3 / 4 * pi],  # upper-left (l0)
-                    [10, torch.deg2rad(torch.tensor(80)), -1 / 2 * pi],  # upper-left (l1)
-                    [5, torch.deg2rad(torch.tensor(90)), 3 / 4 * pi],  # lower-right (l0)
+                    [10, torch.deg2rad(torch.tensor(65)), -7 / 8 * pi],  # upper-left (l0)
+                    [10, torch.deg2rad(torch.tensor(65)), -7 / 8 * pi],  # upper-left (l1)
+                    [5, torch.deg2rad(torch.tensor(85)), 5 / 8 * pi],  # lower-right (l0)
                 ],
                 dtype=torch.float,
             )
