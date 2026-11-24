@@ -83,6 +83,18 @@ class TargetAssignment:
     upper_bound_multiplier: float = 1.4
     lower_bound_multiplier: float = 0.4
 
+    # The assignment of feature vectors to targets:
+    #   optimal_transport: the solution of the (unbalanced) optimal transport problem between the predictions and the
+    #       targets (classification, IoU and center distance cost), restricted to matching receptive fields
+    #   points_in_box: as in range view detectors (RangeDet, arXiv:2103.10039): a feature vector is assigned to a
+    #       target if the input frustum it is centered on contains a lidar point within the 3D box of the target (the
+    #       closest point decides between targets); each target is assigned to the single featuremap layer whose range
+    #       interval contains the distance of its center. Requires the AssignFrustumsToTargets augmentation.
+    strategy: Literal["optimal_transport", "points_in_box"] = "optimal_transport"
+    # points_in_box: {layer: [min_range, max_range)} in meters; RangeDet uses [0, 15), [15, 30), [30, 80] for the
+    #   strides 1, 2 and 4. Targets outside all intervals are not assigned.
+    level_ranges: dict[str, tuple[float, float]] | None = None
+
 
 @dataclass(slots=True, kw_only=True)
 class ConfigDiscretize:
