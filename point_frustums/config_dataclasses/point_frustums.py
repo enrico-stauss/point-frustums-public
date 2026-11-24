@@ -122,7 +122,7 @@ class ConfigDiscretize:
 
 @dataclass(slots=True, kw_only=True)
 class DecoratorFunction:
-    id: Literal["relative_angle", "distance_to_mean"]
+    id: Literal["relative_angle", "distance_to_mean", "distance_to_mean_local", "distance_to_min"]
     channel: Literal["x", "y", "z", "radial", "azimuthal", "polar", "intensity", "timestamp"]
     std: float
 

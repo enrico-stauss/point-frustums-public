@@ -330,18 +330,76 @@ def decorator_distance_to_mean(
     return (pc_channel / std)[:, None]
 
 
-def decorator_relative_angle(pc_channel: torch.Tensor, delta_rad: float, std: Optional[float] = 1.0):
+def decorator_relative_angle(
+    pc_channel: torch.Tensor, delta_rad: float, std: float | None = 1.0, start_rad: float = 0.0
+):
     """
     Returns the (rad) angle between the center of the frustum and the point in the respective dimension.
     :param pc_channel:
-    :param delta_rad:
+    :param delta_rad: The angular width of the frustums
     :param std: The normalization constant that scales the standard deviation to 1, determined empirically
+    :param start_rad: The start of the field of view, i.e. the boundary of the first frustum
     :return:
     """
     # Normalize output by shifting to the frustum center and dividing by an (empirically estimated) standard deviation
-    angle = (pc_channel % delta_rad - (delta_rad / 2)) / delta_rad
+    angle = ((pc_channel - start_rad) % delta_rad - (delta_rad / 2)) / delta_rad
     angle = angle / std
     return angle[:, None]
+
+
+def decorator_distance_to_mean_local(  # pylint: disable=too-many-arguments
+    pc_x: torch.Tensor,
+    pc_y: torch.Tensor,
+    azimuth_frustum: torch.Tensor,
+    n_frustums: int,
+    counts_padded: torch.Tensor,
+    i_frustum: torch.Tensor,
+    component: str,
+    std: float | None = 1.0,
+):
+    """
+    The distance of the point to the mean of its frustum in the horizontal plane, rotated into the frame of the frustum
+    (by its azimuth) instead of the fixed x/y axes: the longitudinal component along the center ray of the frustum and
+    the lateral component perpendicular to it. Unlike the x/y distances, their meaning does not depend on the azimuth,
+    as the translation equivariant convolutions along the azimuth require.
+    :param pc_x: The x coordinates of the points [N]
+    :param pc_y: The y coordinates of the points [N]
+    :param azimuth_frustum: The azimuth of the center of the frustum of each point [N]
+    :param n_frustums:
+    :param counts_padded:
+    :param i_frustum:
+    :param component: "longitudinal" or "lateral"
+    :param std: The normalization constant that scales the standard deviation to 1, determined empirically
+    :return:
+    """
+    counts = counts_padded.clamp(min=1)
+    mean_x = pc_x.new_zeros((n_frustums,)).index_add(0, i_frustum, pc_x).div(counts)[i_frustum]
+    mean_y = pc_y.new_zeros((n_frustums,)).index_add(0, i_frustum, pc_y).div(counts)[i_frustum]
+    delta_x, delta_y = pc_x - mean_x, pc_y - mean_y
+    cos, sin = torch.cos(azimuth_frustum), torch.sin(azimuth_frustum)
+    if component == "longitudinal":
+        distance = cos * delta_x + sin * delta_y
+    elif component == "lateral":
+        distance = -sin * delta_x + cos * delta_y
+    else:
+        raise ValueError(f"Invalid component {component}, choose from 'longitudinal' and 'lateral'.")
+    return (distance / std)[:, None]
+
+
+def decorator_distance_to_min(pc_channel: torch.Tensor, n_frustums: int, i_frustum: torch.Tensor, std: float = 1.0):
+    """
+    The distance of the point to the minimum of its frustum, e.g. for the radial channel, how far the point lies behind
+    the closest surface within the frustum.
+    :param pc_channel: [N]
+    :param n_frustums:
+    :param i_frustum:
+    :param std: The normalization constant that scales the standard deviation to 1, determined empirically
+    :return:
+    """
+    minimum = pc_channel.new_zeros((n_frustums,)).scatter_reduce(
+        0, i_frustum, pc_channel, reduce="amin", include_self=False
+    )
+    return ((pc_channel - minimum[i_frustum]) / std)[:, None]
 
 
 class FrustumEncoder(nn.Module):  # pylint: disable=too-many-instance-attributes
@@ -481,11 +539,16 @@ class FrustumEncoder(nn.Module):  # pylint: disable=too-many-instance-attributes
                         "azimuthal": self.discretize.delta_azi,
                         "polar": self.discretize.delta_pol,
                     }[fn.channel]
+                    start_rad = {
+                        "azimuthal": self.discretize.fov_azi[0],
+                        "polar": self.discretize.fov_pol[0],
+                    }[fn.channel]
                     decorated_channels.append(
                         decorator_relative_angle(
                             pc_channel=pc_channel,
                             delta_rad=delta_rad,
                             std=fn.std,
+                            start_rad=start_rad,
                         )
                     )
                 case "distance_to_mean":
@@ -498,6 +561,30 @@ class FrustumEncoder(nn.Module):  # pylint: disable=too-many-instance-attributes
                             i_unique=i_unique,
                             i_inv=i_inv,
                             std=fn.std,
+                        )
+                    )
+                case "distance_to_mean_local":
+                    # The channel selects the component: x -> longitudinal, y -> lateral (w.r.t. the frustum center)
+                    i_azi = torch.remainder(i_frustum, self.discretize.n_splits_azi)
+                    azimuth_frustum = (
+                        self.discretize.fov_azi[0] + (i_azi.to(pc.dtype) + 0.5) * self.discretize.delta_azi
+                    )
+                    decorated_channels.append(
+                        decorator_distance_to_mean_local(
+                            pc_x=pc[:, self.channels_in.index("x")],
+                            pc_y=pc[:, self.channels_in.index("y")],
+                            azimuth_frustum=azimuth_frustum,
+                            n_frustums=self.discretize.n_splits,
+                            counts_padded=counts_padded,
+                            i_frustum=i_frustum,
+                            component={"x": "longitudinal", "y": "lateral"}[fn.channel],
+                            std=fn.std,
+                        )
+                    )
+                case "distance_to_min":
+                    decorated_channels.append(
+                        decorator_distance_to_min(
+                            pc_channel=pc_channel, n_frustums=self.discretize.n_splits, i_frustum=i_frustum, std=fn.std
                         )
                     )
                 case _:
