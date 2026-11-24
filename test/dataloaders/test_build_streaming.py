@@ -9,6 +9,8 @@ from litdata import StreamingDataset
 
 from point_frustums import ROOT_DIR
 from point_frustums.dataloaders import build_streaming
+from point_frustums.geometry.coordinate_system_conversion import cart_to_sph_torch
+from point_frustums.dataloaders.nuscenes import NuScenesStreamingDataset, compact_lidar, expand_lidar
 from point_frustums.dataloaders.sampling import count_targets_streaming, num_streaming_items, read_target_counts
 
 CONFIG = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "point_frustums.yaml")
@@ -29,6 +31,23 @@ def test_parse_parts():
     assert build_streaming.parse_parts("10") == [10]
     with pytest.raises(ValueError):
         build_streaming.parse_parts("0-2")
+
+
+def test_compact_lidar_round_trip():
+    xyz = torch.randn(1000, 3) * 40
+    intensity = torch.randint(0, 256, (1000, 1)).float()
+    timestamp = torch.rand(1000, 1) * 0.5
+    sph = cart_to_sph_torch(xyz)
+    pc = torch.cat((xyz, intensity, timestamp, sph), dim=1)
+    stored = compact_lidar(pc)
+    assert stored["xyz"].dtype == torch.float32 and stored["intensity_timestamp"].dtype == torch.float16
+    restored = expand_lidar(stored)
+    # Geometry and intensity are exact, the timestamp is rounded to float16 (spacing <= 2^-12 s below 0.5 s)
+    torch.testing.assert_close(restored[:, :4], pc[:, :4], rtol=0, atol=0)
+    torch.testing.assert_close(restored[:, 4], pc[:, 4], rtol=0, atol=2**-12)
+    torch.testing.assert_close(restored[:, 5:], pc[:, 5:], rtol=0, atol=0)
+    # Point clouds stored in full (caches built before the compact format) pass through
+    assert expand_lidar(pc) is pc
 
 
 def test_download_and_extract_streams_tgz(tmp_path):
@@ -116,6 +135,9 @@ def test_incremental_build_on_mini(tmp_path, monkeypatch):
     with open(os.path.join(output, build_streaming.STATE_FILE), encoding="utf-8") as f:
         assert json.load(f) == {"parts_done": [1, 2]}
 
+    # Restore the raw files (removed by the build) to compare the stored with the original point clouds
+    fetch_part(1)
+    fetch_part(2)
     for split in ("train", "val"):
         split_dir = os.path.join(output, split)
         dataset = datamodule.nuscenes_split(split)
@@ -133,3 +155,14 @@ def test_incremental_build_on_mini(tmp_path, monkeypatch):
             assert item["metadata"]["sample_token"] == stored["sample_tokens"][i]
             expected = torch.bincount(item["targets"]["class"].long(), minlength=counts.shape[1])
             assert torch.equal(counts[i], expected)
+
+        # The point clouds are stored in the compact format and restored on loading
+        assert set(items[0]["lidar"]["LIDAR_TOP"].keys()) == {"xyz", "intensity_timestamp"}
+        restored = NuScenesStreamingDataset(input_dir=split_dir)
+        for i in (0, len(items) - 1):
+            original = dataset[dataset.sample_tokens.index(stored["sample_tokens"][i])]["lidar"]["LIDAR_TOP"]
+            loaded = restored[i]["lidar"]["LIDAR_TOP"]
+            assert loaded.shape == original.shape and loaded.dtype == torch.float32
+            torch.testing.assert_close(loaded[:, :4], original[:, :4], rtol=0, atol=0)
+            torch.testing.assert_close(loaded[:, 4], original[:, 4], rtol=0, atol=5e-4)
+            torch.testing.assert_close(loaded[:, 5:], original[:, 5:], rtol=1e-5, atol=1e-5)

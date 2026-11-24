@@ -33,11 +33,47 @@ from point_frustums.dataloaders.sampling import (
     weighted_sampler,
 )
 from point_frustums.geometry.boxes import transform_boxes
+from point_frustums.geometry.coordinate_system_conversion import cart_to_sph_torch
 from point_frustums.geometry.quaternion import quaternion_to_rotation_matrix
 from point_frustums.geometry.utils import cart_to_sph_numpy
 from point_frustums.utils.custom_types import Targets
 from point_frustums.utils import storage
 from point_frustums.utils.environment_helpers import data_root_getter
+
+
+def compact_lidar(pc: torch.Tensor) -> dict[str, torch.Tensor]:
+    """
+    The storage format of a point cloud [N, 8] with the channels (x, y, z, intensity, timestamp, radial, polar,
+    azimuthal): the cartesian coordinates in float32, the intensity (integers in [0, 255], exact) and the timestamp
+    (< 1s, resolution <= 0.5ms) in float16; the spherical coordinates are not stored but recomputed on loading
+    (expand_lidar). 16 instead of 32 bytes per point.
+    :param pc: The point cloud [N, 8]
+    :return:
+    """
+    assert pc.dim() == 2 and pc.shape[1] == 8, f"Expected a point cloud with 8 channels, got {tuple(pc.shape)}"
+    return {"xyz": pc[:, :3].to(torch.float32).contiguous(), "intensity_timestamp": pc[:, 3:5].to(torch.float16)}
+
+
+def expand_lidar(pc: torch.Tensor | Mapping[str, torch.Tensor]) -> torch.Tensor:
+    """
+    Restore the point cloud [N, 8] (x, y, z, intensity, timestamp, radial, polar, azimuthal) from the storage format
+    (compact_lidar); point clouds that were stored in full are returned unchanged.
+    :param pc:
+    :return:
+    """
+    if isinstance(pc, torch.Tensor):
+        return pc
+    xyz = pc["xyz"].to(torch.float32)
+    return torch.cat((xyz, pc["intensity_timestamp"].to(torch.float32), cart_to_sph_torch(xyz)), dim=1)
+
+
+def _get_item_compact(dataset: Dataset, i: int) -> MutableMapping:
+    """Load sample i of the dataset with the point clouds in the storage format (for the litdata optimization)."""
+    data = dataset[i]
+    if data.get("lidar") is not None:
+        data["lidar"] = {sensor: compact_lidar(pc) for sensor, pc in data["lidar"].items()}
+    return data
+
 
 VISIBILITY_LEVELS = {
     "v0-40": 40,
@@ -658,6 +694,8 @@ class NuScenesStreamingDataset(StreamingDataset):
         # litdata deserializes tensors as zero-copy views into the read-only memory-mapped chunk file; the in-place
         # augmentations (and any later in-place OP) would crash with SIGBUS when writing to them, so copy them first.
         data = tree_map_only(torch.Tensor, torch.clone, data)
+        if data.get("lidar") is not None:
+            data["lidar"] = {sensor: expand_lidar(pc) for sensor, pc in data["lidar"].items()}
         # Apply augmentation to data and targets
         if self.augmentations is not None:
             with torch.inference_mode():
@@ -822,7 +860,7 @@ class NuScenesDataModule(LightningDataModule):
         if not storage.is_remote(output_dir):
             os.makedirs(output_dir, exist_ok=True)
         optimize(
-            fn=dataset.__getitem__,
+            fn=partial(_get_item_compact, dataset),
             inputs=indices,
             output_dir=output_dir,
             chunk_size=None if chunk_bytes is not None else self.streaming_chunk_size,
