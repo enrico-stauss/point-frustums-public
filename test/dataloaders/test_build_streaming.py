@@ -72,6 +72,27 @@ def test_download_and_extract_streams_tgz(tmp_path):
     assert dest.exists()
 
 
+def test_download_and_extract_keeps_preexisting_files(tmp_path):
+    # Files that are on disk already (e.g. v1.0-mini, a subset of trainval) must not be returned for removal
+    source = tmp_path / "source" / "samples" / "LIDAR_TOP"
+    source.mkdir(parents=True)
+    (source / "a.pcd.bin").write_bytes(b"a" * 100)
+    (source / "b.pcd.bin").write_bytes(b"b" * 50)
+    archive = tmp_path / "part.tgz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(tmp_path / "source" / "samples", arcname="samples")
+
+    dest = tmp_path / "root"
+    (dest / "samples" / "LIDAR_TOP").mkdir(parents=True)
+    (dest / "samples" / "LIDAR_TOP" / "a.pcd.bin").write_bytes(b"a" * 100)
+    files = build_streaming.download_and_extract(archive.as_uri(), str(dest))
+    assert [os.path.relpath(f, dest) for f in files] == ["samples/LIDAR_TOP/b.pcd.bin"]
+
+    build_streaming.remove_files(files, str(dest))
+    assert (dest / "samples" / "LIDAR_TOP" / "a.pcd.bin").exists()
+    assert not (dest / "samples" / "LIDAR_TOP" / "b.pcd.bin").exists()
+
+
 @pytest.mark.skipif(_mini_root() is None, reason="NuScenes v1.0-mini is not available")
 def test_incremental_build_on_mini(tmp_path, monkeypatch):
     from pytorch_lightning.cli import LightningCLI  # pylint: disable=import-outside-toplevel
