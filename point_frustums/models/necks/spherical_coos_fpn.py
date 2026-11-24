@@ -5,7 +5,7 @@ from torch import nn
 from torchvision.models.resnet import Bottleneck, conv1x1
 
 from point_frustums.config_dataclasses.fpn import ConfigFPNLayer, ConfigFPNExtraLayer
-from point_frustums.ops.spherical_coos_convolutions import Conv2dSpherical
+from point_frustums.ops.spherical_coos_convolutions import Conv2dSpherical, UpsampleSpherical
 
 
 class BottleneckRangeImage(Bottleneck):
@@ -23,7 +23,7 @@ class BottleneckRangeImage(Bottleneck):
         groups: int = 1,
         base_width: int = 64,
         dilation: int = 1,
-        **kwargs
+        **kwargs,
     ):
         """
         Overwrite the conv2 attribute to a custom convolution with circular padding along the azimuthal (horizontal)
@@ -42,7 +42,7 @@ class BottleneckRangeImage(Bottleneck):
             groups=groups,
             base_width=base_width,
             dilation=dilation,
-            **kwargs
+            **kwargs,
         )
         width = int(planes * (base_width / 64.0)) * groups
         self.conv2 = Conv2dSpherical(
@@ -167,7 +167,11 @@ class FPN(nn.Module):
             if prev is not None:
                 # Delay initialization of the bottom-up pathway by one layer as it is dependent on the specification of
                 # the consecutive layer
-                down[prev] = nn.Upsample(scale_factor=layer.stride, mode=self.upsampling_mode)
+                if self.upsampling_mode == "aligned":
+                    # Consistent with the sampling positions of the strided convolutions (see UpsampleSpherical)
+                    down[prev] = UpsampleSpherical(scale_factor=layer.stride)
+                else:
+                    down[prev] = nn.Upsample(scale_factor=layer.stride, mode=self.upsampling_mode)
                 post[prev] = nn.Sequential(
                     nn.Dropout2d(self.dropout),
                     self.norm_layer(num_channels=self.n_channels_out),
