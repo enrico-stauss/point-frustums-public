@@ -1,10 +1,8 @@
-from typing import Optional
-
 import torch
 from torch import nn
 from torchvision.models.resnet import Bottleneck, conv1x1
 
-from point_frustums.config_dataclasses.fpn import ConfigFPNLayer, ConfigFPNExtraLayer
+from point_frustums.config_dataclasses.fpn import ConfigFPNExtraLayer, ConfigFPNLayer
 from point_frustums.ops.spherical_coos_convolutions import Conv2dSpherical, UpsampleSpherical
 
 
@@ -68,7 +66,7 @@ class FPN(nn.Module):
         n_channels_in: int,
         n_channels_out: int,
         layers: dict[str, ConfigFPNLayer],
-        extra_layers: Optional[dict[str, ConfigFPNExtraLayer]] = None,
+        extra_layers: dict[str, ConfigFPNExtraLayer] | None = None,
         dropout: float = 0.0,
         upsampling_mode: str = "bilinear",
     ):

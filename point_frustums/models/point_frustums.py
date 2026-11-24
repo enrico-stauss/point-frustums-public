@@ -3,8 +3,8 @@ import os
 import random
 from copy import deepcopy
 from functools import cached_property
-from math import prod, exp, isclose, ceil
-from typing import Literal, Optional, Any
+from math import ceil, exp, isclose, prod
+from typing import Any, Literal
 
 import pytorch_lightning.loggers
 import torch
@@ -14,18 +14,18 @@ from torchvision.ops import sigmoid_focal_loss
 
 from point_frustums.config_dataclasses.dataset import Annotations
 from point_frustums.config_dataclasses.point_frustums import (
-    ModelOutputSpecification,
-    TargetAssignment,
-    Losses,
-    Predictions,
     Logging,
+    Losses,
+    ModelOutputSpecification,
+    Predictions,
+    TargetAssignment,
 )
-from point_frustums.geometry.coordinate_system_conversion import sph_to_cart_torch, cart_to_sph_torch
+from point_frustums.geometry.coordinate_system_conversion import cart_to_sph_torch, sph_to_cart_torch
 from point_frustums.geometry.quaternion import rotate_2d
 from point_frustums.geometry.rotation_matrix import (
+    rotation_matrix_from_rotation_6d,
     rotation_matrix_from_spherical_coordinates,
     rotation_matrix_to_rotation_6d,
-    rotation_matrix_from_rotation_6d,
 )
 from point_frustums.geometry.utils import (
     angle_to_neg_pi_to_pi,
@@ -44,6 +44,7 @@ from point_frustums.ops.sinkhorn import sinkhorn_unbalanced_ti
 from point_frustums.utils.custom_types import Targets
 from point_frustums.utils.logging import log_pointcloud
 from point_frustums.utils.plotting import render_target_assignment
+
 from .backbones import PointFrustumsBackbone
 from .base_models import Detection3DModel
 from .base_runtime import Detection3DRuntime
@@ -93,8 +94,8 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         self.logging = logging
         self.featuremap_parametrization = self._register_featuremap_parametrization()
 
-        self.nds_train: Optional[NuScenesDetectionScore] = None
-        self.nds_val: Optional[NuScenesDetectionScore] = None
+        self.nds_train: NuScenesDetectionScore | None = None
+        self.nds_val: NuScenesDetectionScore | None = None
         self._annotations = None
 
         self.featuremap_assignment_count = FeaturemapLevelAssignments(num_levels=len(self.model.neck.fpn.strides))
@@ -117,7 +118,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         self.trainer.fit_loop.setup_data()
         self.nds_val = NuScenesDetectionScore(self.annotations)
         self.nds_train = NuScenesDetectionScore(self.annotations)
-        if bool(self.trainer.fast_dev_run) is False:  # NOQA
+        if bool(self.trainer.fast_dev_run) is False:
             self._setup_logger()
 
     @property
@@ -166,7 +167,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
             assert n_layers == len(s)
 
             r = 0
-            for n_layers in range(0, n_layers):
+            for n_layers in range(n_layers):
                 r += (k[n_layers] - 1) * prod(s[0:n_layers])
             return int(r + 1)
 
@@ -339,7 +340,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         return torch.tensor(self.predictions.n_detections, device=self.device)
 
     @staticmethod
-    def _one_hot(label: torch.Tensor, num_classes: int, index: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _one_hot(label: torch.Tensor, num_classes: int, index: torch.Tensor | None = None) -> torch.Tensor:
         assert label.dim() == 1
         one_hot = F.one_hot(label.clip(min=0), num_classes=num_classes)  # pylint: disable=not-callable
         if index is not None:
@@ -348,7 +349,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
             one_hot[~mask, :] = 0
         return one_hot.float()
 
-    def _encode_center(self, x: torch.Tensor, *, idx_feat: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _encode_center(self, x: torch.Tensor, *, idx_feat: torch.Tensor | None = None) -> torch.Tensor:
         """
         Encode the M spherical center coordinates w.r.t. the angular position of the feature vectors. Scale the angular
         delta furthermore with the distance.
@@ -375,7 +376,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         x[..., 2] = angle_to_neg_pi_to_pi(x[..., 2] - center_pol_azi[..., 1]) * x[..., 0]
         return x
 
-    def _decode_center(self, x: torch.Tensor, idx_feat: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _decode_center(self, x: torch.Tensor, idx_feat: torch.Tensor | None = None) -> torch.Tensor:
         """
         Decode the M spherical center coordinates w.r.t. the angular position of the feature vectors. Scale the angular
         delta furthermore with the distance.
@@ -398,7 +399,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
     def _decode_wlh(x: torch.Tensor) -> torch.Tensor:
         return x.exp()
 
-    def _encode_orientation(self, x: torch.Tensor, *, idx_feat: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _encode_orientation(self, x: torch.Tensor, *, idx_feat: torch.Tensor | None = None) -> torch.Tensor:
         """
         Encode the provided M orientation matrices w.r.t. the angular coordinates on the featuremap and subsequently in
         form of the 6D encoding suggested in: http://arxiv.org/abs/1812.07035
@@ -415,7 +416,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         x = torch.einsum("...ij,...jk->...ik", rotation_matrices, x)
         return rotation_matrix_to_rotation_6d(x)
 
-    def _decode_orientation(self, x: torch.Tensor, idx_feat: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def _decode_orientation(self, x: torch.Tensor, idx_feat: torch.Tensor | None = None) -> torch.Tensor:
         """
         Decode the provided M vectors encoded in form of the 6D encoding (http://arxiv.org/abs/1812.07035) to the
         matrix form and then rotate them back according to the angular coordinates on the featuremap.
@@ -432,7 +433,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         return torch.einsum("...ij,...jk->...ik", rotation_matrices, x)
 
     def _encode_velocity(
-        self, x: torch.tensor, ego_velocity: torch.Tensor, *, idx_feat: Optional[torch.Tensor] = None
+        self, x: torch.tensor, ego_velocity: torch.Tensor, *, idx_feat: torch.Tensor | None = None
     ) -> torch.Tensor:
         """
         Encode the velocity as [normal, tangential] velocity by rotating it by the negative of the azimuthal position.
@@ -449,7 +450,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         return rotate_2d(phi=-phi, x=x[..., [0, 1]])
 
     def _decode_velocity(
-        self, x: torch.Tensor, ego_velocity: torch.Tensor, idx_feat: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, ego_velocity: torch.Tensor, idx_feat: torch.Tensor | None = None
     ) -> torch.Tensor:
         """
         Decode the [normal, tangential] velocity into cartesian [x, y] components by rotating it by the azimuthal
@@ -783,7 +784,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         assignments = (indices[:, None] >= lower) * (indices[:, None] < upper)
         self.featuremap_assignment_count(assignments.sum(dim=0))
         counts = self.featuremap_assignment_count.compute()
-        self.log_dict({f"TargetAssignments/Level {k}": v for k, v in enumerate(counts)}, reduce_fx="sum")  # NOQA
+        self.log_dict({f"TargetAssignments/Level {k}": v for k, v in enumerate(counts)}, reduce_fx="sum")
         missed_targets = self.missed_targets.compute()
         outflows = self.preassignment_outflows.compute()
         self.log("TargetAssignments/Missed Targets", missed_targets, reduce_fx="sum")
@@ -957,7 +958,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         output = self._flatten_output_channels_last(output=output)
 
         score_vfl_factor = self.predictions.score_vfl_factor
-        loss_config = getattr(self.losses, "vfl")
+        loss_config = self.losses.vfl
         if not loss_config.active or self.trainer.current_epoch < loss_config.from_epoch:
             score_vfl_factor = 0.0
 
@@ -1029,7 +1030,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         for key, value in step_output["losses"].items():
             self.log(f"Loss/{key}/{mode}", value, batch_size=len(batch["metadata"]))
 
-    def _post_pointcloud(self, batch, detections, logging_frequency: int = 1, prefix: Optional[str] = None):
+    def _post_pointcloud(self, batch, detections, logging_frequency: int = 1, prefix: str | None = None):
         if logging_frequency is None:
             return
 
@@ -1082,7 +1083,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
 
     def on_train_batch_end(self, outputs: TRAIN_STEP_OUTPUT, batch: Any, batch_idx: int):
         self._post_loss(step_output=outputs, batch=batch, mode="train")
-        if (batch_idx % self.trainer.log_every_n_steps) == 0:  # NOQA
+        if (batch_idx % self.trainer.log_every_n_steps) == 0:
             ego_velocities = [sample["velocity"] for sample in batch["metadata"]]
             # Extract the detections from the network output and decode
             detections = self.get_detections(output=outputs["network_output"], ego_velocities=ego_velocities)
@@ -1090,7 +1091,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
             self.log_dict(self.nds_train.log_dict(nds, mode="train"))
             del nds
             self.nds_train.reset()
-            modified_frequency = self.logging.frequency_log_train_sample / self.trainer.log_every_n_steps  # NOQA
+            modified_frequency = self.logging.frequency_log_train_sample / self.trainer.log_every_n_steps
             self._post_pointcloud(batch, detections, logging_frequency=modified_frequency, prefix="Train")
         # Release the MPS cache last (see BaseRuntime), after the detections of this batch were evaluated
         super().on_train_batch_end(outputs, batch, batch_idx)

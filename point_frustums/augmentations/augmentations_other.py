@@ -2,12 +2,12 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass
 from functools import cached_property
 from math import ceil
-from typing import Optional
 
 import torch
 
 from point_frustums.config_dataclasses.point_frustums import ConfigDiscretize
 from point_frustums.utils.custom_types import Targets
+
 from .augmentations import Augmentation
 
 
@@ -43,9 +43,9 @@ def normalize(data: torch.Tensor, channels: list[int], mean: torch.Tensor, std: 
 class Normalize(Augmentation):
     def __init__(
         self,
-        lidar: Optional[NormalizationParameters] = None,
-        camera: Optional[NormalizationParameters] = None,
-        radar: Optional[NormalizationParameters] = None,
+        lidar: NormalizationParameters | None = None,
+        camera: NormalizationParameters | None = None,
+        radar: NormalizationParameters | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -55,14 +55,14 @@ class Normalize(Augmentation):
         for modality in self.apply_to:
             assert getattr(self, f"_{modality}") is not None
 
-    def camera(self, data: torch.Tensor, metadata: Optional[MutableMapping]):
+    def camera(self, data: torch.Tensor, metadata: MutableMapping | None):
         metadata["augmentations"][str(self)] = {"camera": self._camera.log}
         return normalize(data, self._camera.channels, self._camera.tensor_mean, self._camera.tensor_std)
 
-    def radar(self, data: torch.Tensor, metadata: Optional[MutableMapping]):
+    def radar(self, data: torch.Tensor, metadata: MutableMapping | None):
         raise NotImplementedError()
 
-    def lidar(self, data: torch.Tensor, metadata: Optional[MutableMapping]):
+    def lidar(self, data: torch.Tensor, metadata: MutableMapping | None):
         metadata["augmentations"][str(self)] = {"lidar": self._lidar.log}
         return normalize(data, self._lidar.channels, self._lidar.tensor_mean, self._lidar.tensor_std)
 
@@ -86,7 +86,7 @@ class SubsampleData(Augmentation):
         self.drop_ratio = drop_ratio
         self._n_max = n_max
 
-    def lidar(self, data: torch.Tensor, metadata: Optional[MutableMapping]):
+    def lidar(self, data: torch.Tensor, metadata: MutableMapping | None):
         """
         Remove a fraction of the points, the remaining points keep their order.
         The global torch RNG is used: the DataLoader seeds it differently for each worker and epoch, whereas a
@@ -104,10 +104,10 @@ class SubsampleData(Augmentation):
             metadata["augmentations"][str(self)] = {"keep_ratio": keep_ratio}
         return data[indices, ...]
 
-    def camera(self, data: torch.Tensor, metadata: Optional[MutableMapping]):
+    def camera(self, data: torch.Tensor, metadata: MutableMapping | None):
         raise NotImplementedError()
 
-    def radar(self, data: torch.Tensor, metadata: Optional[MutableMapping]):
+    def radar(self, data: torch.Tensor, metadata: MutableMapping | None):
         raise NotImplementedError()
 
     def targets(self, targets: Targets):
