@@ -238,7 +238,6 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         size_per_layer = []
         size_per_layer_flat = []
         feat_rfs_center = []
-        stride_per_layer = []
         for layer, stride in self.strides.items():
             assert isclose(discretize.n_splits_pol % stride[0], 0), (
                 f"The polar input featuremap resolution {discretize.n_splits_pol} is not divisible by the stride "
@@ -248,21 +247,21 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
                 f"The azimuthal input featuremap resolution {discretize.n_splits_azi} is not divisible by the "
                 f"stride {stride[1]} on layer {layer}."
             )
-            stride_per_layer.append(stride)
             size_per_layer.append((int(discretize.n_splits_pol / stride[0]), int(discretize.n_splits_azi / stride[1])))
             size_per_layer_flat.append(int(discretize.n_splits / prod(stride)))
 
-            # Get the node position w.r.t. the original input data shape
-            nodes_pol = torch.arange(0, discretize.n_splits_pol - 1e-8, step=stride[0])
-            nodes_azi = torch.arange(0, discretize.n_splits_azi - 1e-8, step=stride[1])
+            # Get the node position w.r.t. the original input data shape, in units of frustums where the frustum i spans
+            #   [i, i + 1). The (circularly/zero padded, odd-sized) strided convolutions and the strided 1x1 shortcut
+            #   sample the input at every stride-th frustum, hence node k of a layer with stride s is centered on the
+            #   frustum s * k, i.e. at s * k + 0.5 (and not at the center s * k + s / 2 of the s frustums it summarizes).
+            nodes_pol = torch.arange(0, discretize.n_splits_pol - 1e-8, step=stride[0]) + 0.5
+            nodes_azi = torch.arange(0, discretize.n_splits_azi - 1e-8, step=stride[1]) + 0.5
 
             # Create meshgrid representation for easy indexing (in row-major ordering)
             nodes_azi, nodes_pol = torch.meshgrid(nodes_azi, nodes_pol, indexing="xy")
             nodes_azi, nodes_pol = nodes_azi.flatten(), nodes_pol.flatten()
             # Merge to obtain the [x, y] coordinates of the centers
             feat_rfs_center.append(torch.stack((nodes_azi, nodes_pol), dim=1))
-
-        stride_per_layer = torch.tensor(stride_per_layer)
 
         feat_rfs_center = torch.cat(feat_rfs_center, dim=0)
         self.register_buffer("feat_rfs_centers", feat_rfs_center)
@@ -274,13 +273,9 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         feat_rfs_sizes = torch.tensor(layers_rfs).repeat_interleave(torch.tensor(size_per_layer_flat), dim=0)
         self.register_buffer("feat_rfs_sizes", feat_rfs_sizes)
 
-        # Scale-scale-shift grid centers to angular center coordinates
-        feat_center_pol_azi = feat_rfs_center[:, [1, 0]]
-        feat_center_pol_azi /= torch.tensor([discretize.n_splits_pol, discretize.n_splits_azi])
-        feat_center_pol_azi *= torch.tensor([discretize.range_pol, discretize.range_azi])
+        # Scale and shift the grid centers to angular coordinates; the same positions as used for the target matching
+        feat_center_pol_azi = feat_rfs_center[:, [1, 0]] * torch.tensor([discretize.delta_pol, discretize.delta_azi])
         feat_center_pol_azi += torch.tensor([discretize.fov_pol[0], discretize.fov_azi[0]])
-        frustum_width_per_layer = stride_per_layer * torch.tensor([discretize.delta_pol, discretize.delta_azi])
-        feat_center_pol_azi += (frustum_width_per_layer / 2).repeat_interleave(torch.tensor(size_per_layer_flat), dim=0)
         self.register_buffer("feat_center_pol_azi", feat_center_pol_azi)
 
         return ModelOutputSpecification(
