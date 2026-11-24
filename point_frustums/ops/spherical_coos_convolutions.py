@@ -1,9 +1,8 @@
 from functools import cached_property
 from math import isclose
-from typing import Optional
 
 import torch
-from torch import nn, Tensor
+from torch import Tensor, nn
 from torch.nn import functional as F
 
 
@@ -25,7 +24,7 @@ class Conv2dSpherical(nn.Conv2d):
         pad = (self.kernel_size[0] - 1) // 2
         return 0, 0, pad, pad
 
-    def _conv_forward(self, input: Tensor, weight: Tensor, bias: Optional[Tensor]):
+    def _conv_forward(self, input: Tensor, weight: Tensor, bias: Tensor | None):
         input = F.pad(input, pad=self.pad_horizontal, mode="circular")  # pylint: disable=not-callable
         input = F.pad(input, pad=self.pad_vertical, mode="constant", value=0.0)  # pylint: disable=not-callable
         return F.conv2d(  # pylint: disable=not-callable

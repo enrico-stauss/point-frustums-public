@@ -1,18 +1,18 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from functools import cached_property
-from typing import Optional, Literal, Dict
+from typing import Literal
 
 import torch
 import torch.utils.checkpoint
 from torch import nn
 
 from point_frustums.config_dataclasses.point_frustums import (
-    ConfigDiscretize,
-    ConfigVectorize,
     ConfigDecorate,
+    ConfigDiscretize,
     ConfigReduce,
     ConfigTransformerFrustumEncoder,
+    ConfigVectorize,
 )
 from point_frustums.ops.segment_attention import segment_attention, segment_softmax_pooling
 
@@ -25,8 +25,8 @@ def symmetrize_max(  # pylint: disable=too-many-arguments
     i_unique: torch.Tensor,
     i_inv: torch.Tensor,
     counts_padded: torch.Tensor,
-    context: Dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    context: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     Compute the max via the torch.scatter_reduce OP.
     :param pc:
@@ -54,8 +54,8 @@ def symmetrize_mean(  # pylint: disable=too-many-arguments
     i_unique: torch.Tensor,
     i_inv: torch.Tensor,
     counts_padded: torch.Tensor,
-    context: Dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    context: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     Compute the mean via the torch.index_add OP as method to compute the frustum-wise sum.
     :param pc:
@@ -89,8 +89,8 @@ def symmetrize_std(  # pylint: disable=too-many-arguments
     i_unique: torch.Tensor,
     i_inv: torch.Tensor,
     counts_padded: torch.Tensor,
-    context: Dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    context: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """
     Compute the std via the torch.index_add OP as method to compute the frustum-wise sum.
     :param pc:
@@ -378,7 +378,7 @@ def decorator_distance_to_mean(
     i_frustum: torch.Tensor,
     i_unique: torch.Tensor,
     i_inv: torch.Tensor,
-    std: Optional[float] = 1.0,
+    std: float | None = 1.0,
 ):
     """
     :param pc_channel:
@@ -485,7 +485,7 @@ class FrustumEncoder(nn.Module):  # pylint: disable=too-many-instance-attributes
         vectorize: ConfigVectorize,
         symmetrize: Sequence[Literal["max", "mean", "std"]],
         reduce: ConfigReduce,
-        transformer_frustum_encoder: Optional[ConfigTransformerFrustumEncoder] = None,
+        transformer_frustum_encoder: ConfigTransformerFrustumEncoder | None = None,
         dropout: float = 0.1,
     ):
         super().__init__()

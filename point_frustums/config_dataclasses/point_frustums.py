@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Literal
 
 from point_frustums.geometry.utils import deg_to_rad
 
@@ -24,8 +24,8 @@ class Predictions:
 
 @dataclass(slots=True, frozen=True)
 class Logging:
-    frequency_log_train_sample: Optional[int] = None
-    frequency_log_val_sample: Optional[int] = None
+    frequency_log_train_sample: int | None = None
+    frequency_log_val_sample: int | None = None
     render_target_assignment: bool = False
 
 
@@ -104,8 +104,8 @@ class TargetAssignment:
 class ConfigDiscretize:
     n_splits_azi: int
     n_splits_pol: int
-    fov_azi_deg: tuple[int, int]
-    fov_pol_deg: tuple[int, int]
+    fov_azi_deg: tuple[float, float]
+    fov_pol_deg: tuple[float, float]
 
     @property
     def fov_azi(self):
@@ -183,7 +183,7 @@ class ConfigTransformerFrustumEncoder:
     n_encoders: int = 1
     # Optional upper bound of the points per frustum that enter the encoder (the attention is exact for all points
     # otherwise; its compute grows quadratically with the points per frustum, its memory only linearly)
-    max_points_per_frustum: Optional[int] = None
+    max_points_per_frustum: int | None = None
     forward_expansion: int = 4
     dropout: float = 0.1
     # Recompute the activations of the encoder blocks in the backward pass (less memory, more compute)

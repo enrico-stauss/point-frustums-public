@@ -10,7 +10,6 @@ from point_frustums.geometry.coordinate_system_conversion import cart_to_sph_tor
 from point_frustums.geometry.rotation_matrix import random_rotation_matrix
 from point_frustums.models.point_frustums import PointFrustums
 
-
 # pylint: disable=protected-access
 
 
@@ -73,7 +72,7 @@ class TestPointFrustumsLosses:
     module_mock._evaluate_receptive_fields = partial(PointFrustums._evaluate_receptive_fields, self=module_mock)
     module_mock.register_buffer = partial(setattr, module_mock)
     fm_params = PointFrustums._register_featuremap_parametrization(module_mock)
-    module_mock.feature_vectors_angular_centers = getattr(module_mock, "feat_center_pol_azi")
+    module_mock.feature_vectors_angular_centers = module_mock.feat_center_pol_azi
 
     layer_sizes = fm_params.layer_sizes_flat
     angular_centers = module_mock.feature_vectors_angular_centers.split_with_sizes(layer_sizes, dim=0)
