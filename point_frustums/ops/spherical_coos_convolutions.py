@@ -9,18 +9,19 @@ from torch.nn import functional as F
 class Conv2dSpherical(nn.Conv2d):
     @cached_property
     def pad_horizontal(self) -> tuple[int, int, int, int]:
-        assert not isclose(
-            self.kernel_size[0] % 2, 0
-        ), f"The horizontal kernel size {self.kernel_size[0]} should be uneven to generate valid padding."
-        pad = (self.kernel_size[0] - 1) // 2
+        # The kernel size is (height, width), the horizontal padding depends on the width
+        assert not isclose(self.kernel_size[1] % 2, 0), (
+            f"The horizontal kernel size {self.kernel_size[1]} should be uneven to generate valid padding."
+        )
+        pad = (self.kernel_size[1] - 1) // 2
         return pad, pad, 0, 0
 
     @cached_property
     def pad_vertical(self) -> tuple[int, int, int, int]:
-        assert not isclose(
-            self.kernel_size[1] % 2, 0
-        ), f"The vertical kernel size {self.kernel_size[1]} should be uneven to generate valid padding."
-        pad = (self.kernel_size[1] - 1) // 2
+        assert not isclose(self.kernel_size[0] % 2, 0), (
+            f"The vertical kernel size {self.kernel_size[0]} should be uneven to generate valid padding."
+        )
+        pad = (self.kernel_size[0] - 1) // 2
         return 0, 0, pad, pad
 
     def _conv_forward(self, input: Tensor, weight: Tensor, bias: Optional[Tensor]):
