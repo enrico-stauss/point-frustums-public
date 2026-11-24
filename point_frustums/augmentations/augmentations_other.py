@@ -108,3 +108,35 @@ class SubsampleData(Augmentation):
 
     def metadata(self, metadata: MutableMapping):
         return metadata
+
+
+class KeepSweeps(Augmentation):
+    """
+    Keep only the points of the n most recent lidar sweeps (deterministic, apply before the normalization).
+
+    The timestamp channel holds the time of each point w.r.t. the reference sweep: the rotation time within the sweep
+    in [0, period) plus the age of the sweep (see NuScenes.add_timestamps), hence the points of the n most recent sweeps
+    have a timestamp below n * period. With n = 1, the pointcloud is a single scan as used by range view detectors.
+    """
+
+    def __init__(self, n_sweeps: int = 1, timestamp_channel: int = 4, period: float = 0.05, **kwargs):
+        super().__init__(**kwargs)
+        assert n_sweeps >= 1
+        self._n_sweeps = n_sweeps
+        self._timestamp_channel = timestamp_channel
+        self._period = period
+
+    def lidar(self, data: torch.Tensor, metadata: MutableMapping | None):
+        return data[data[:, self._timestamp_channel] < self._n_sweeps * self._period]
+
+    def camera(self, data: torch.Tensor, metadata: MutableMapping | None):
+        raise NotImplementedError()
+
+    def radar(self, data: torch.Tensor, metadata: MutableMapping | None):
+        raise NotImplementedError()
+
+    def targets(self, targets: Targets):
+        return targets
+
+    def metadata(self, metadata: MutableMapping):
+        return metadata
