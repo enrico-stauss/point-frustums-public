@@ -70,23 +70,29 @@ def parse_parts(spec: str) -> list[int]:
 
 def download_and_extract(url: str, dest_dir: str, retries: int = 3) -> list[str]:
     """
-    Download a .tgz archive and extract it on the fly into dest_dir (the archive is not stored).
+    Download a .tgz archive and extract it on the fly into dest_dir (the archive is not stored). Files that already
+    exist in dest_dir and were not extracted by this call are skipped and not returned, so that removing the returned
+    files later does not delete data that was there before (e.g. v1.0-mini, whose scenes are part of v1.0-trainval).
     :return: The paths of the extracted files
     """
+    extracted: set[str] = set()  # Across attempts: files of an interrupted attempt are overwritten and still returned
     for attempt in range(1, retries + 1):
-        files, n_bytes, t_start, t_log = [], 0, time.time(), time.time()
+        n_bytes, t_start, t_log = 0, time.time(), time.time()
         try:
             with urllib.request.urlopen(url) as response, tarfile.open(fileobj=response, mode="r|gz") as archive:
                 for member in archive:
-                    archive.extract(member, dest_dir, filter="data")
+                    path = os.path.join(dest_dir, member.name)
                     if member.isfile():
-                        files.append(os.path.join(dest_dir, member.name))
+                        if path not in extracted and os.path.exists(path):
+                            continue
+                        extracted.add(path)
                         n_bytes += member.size
+                    archive.extract(member, dest_dir, filter="data")
                     if time.time() - t_log > 60:
                         t_log = time.time()
                         rate = n_bytes / (t_log - t_start) / 2**20
                         logger.info(f"{os.path.basename(url)}: extracted {n_bytes / 2**30:.1f}GB ({rate:.1f}MB/s)")
-            return files
+            return sorted(extracted)
         except OSError as err:  # Includes connection errors and truncated streams
             logger.warning(f"Downloading {url} failed (attempt {attempt}/{retries}): {err}")
             if attempt == retries:
