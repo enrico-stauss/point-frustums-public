@@ -48,7 +48,10 @@ class Annotations:
 
     @cached_property
     def attributes(self) -> Labels:
-        _attributes = list(set(chain.from_iterable(self.category_to_attributes.values())))
+        # Deduplicate in the order of first occurrence: the iteration order of a set of strings depends on the hash seed,
+        #   which differs between processes, so the integer labels would not match between the process that stores the
+        #   targets (dataset optimization) and the ones that train and evaluate
+        _attributes = list(dict.fromkeys(chain.from_iterable(self.category_to_attributes.values())))
         return Labels(_attributes)
 
     @cached_property
