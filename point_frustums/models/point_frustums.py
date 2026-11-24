@@ -591,6 +591,64 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
 
         return match_index
 
+    def _assign_points_in_box(self, targets: Targets, assignment: dict[str, torch.Tensor] | None) -> torch.Tensor:
+        """
+        Assign a target to each feature vector as range view detectors do (see TargetAssignment.strategy): a feature
+        vector is foreground if the input frustum it is centered on observes a lidar point of the target. Each target
+        is assigned to the single layer whose range interval (TargetAssignment.level_ranges) contains the distance of
+        its center. Apply to a single sample from the batch.
+        :param targets:
+        :param assignment: The output of the AssignFrustumsToTargets augmentation (frustum, target and radial)
+        :return: An integer tensor where -1 represents background and all values >= 0 correspond to one of the targets.
+        """
+        index = torch.full((self.featuremap_parametrization.total_size,), -1, device=self.device)
+        if assignment is None:
+            raise ValueError("The points_in_box target assignment requires the AssignFrustumsToTargets augmentation.")
+        if not self.target_assignment.level_ranges:
+            raise ValueError("The points_in_box target assignment requires TargetAssignment.level_ranges.")
+        d = self.discretization
+        expected = torch.tensor([d.n_splits_azi, d.n_splits_pol, *d.fov_azi_deg, *d.fov_pol_deg])
+        if not torch.allclose(assignment["discretization"].cpu().float(), expected.float()):
+            raise ValueError(
+                f"The discretization of AssignFrustumsToTargets {assignment['discretization'].tolist()} does not match "
+                f"the discretization of the model {expected.tolist()}."
+            )
+        frustum, target, radial = assignment["frustum"], assignment["target"], assignment["radial"]
+        if frustum.numel() == 0:
+            return index
+
+        row = torch.div(frustum, d.n_splits_azi, rounding_mode="floor")
+        col = torch.remainder(frustum, d.n_splits_azi)
+        target_range = targets["center"].norm(dim=-1)[target]
+        spec = self.featuremap_parametrization
+        layers = list(self.strides.keys())
+        offsets = torch.cumsum(torch.tensor([0, *spec.layer_sizes_flat]), dim=0).tolist()
+
+        nodes, node_targets, node_radial = [], [], []
+        for layer, (range_min, range_max) in self.target_assignment.level_ranges.items():
+            i_layer = layers.index(layer)
+            (stride_pol, stride_azi), (height, width) = spec.strides[i_layer], spec.layer_sizes[i_layer]
+            mask = (target_range >= range_min) & (target_range < range_max)
+            # Node k of a layer with stride s is centered on the input frustum s * k: map each frustum to the closest
+            #   node (circular along the azimuth)
+            node_row = torch.round(row[mask] / stride_pol).long().clamp(max=height - 1)
+            node_col = torch.remainder(torch.round(col[mask] / stride_azi).long(), width)
+            nodes.append(offsets[i_layer] + node_row * width + node_col)
+            node_targets.append(target[mask])
+            node_radial.append(radial[mask])
+        nodes, node_targets, node_radial = torch.cat(nodes), torch.cat(node_targets), torch.cat(node_radial)
+
+        # If several frustums of different targets map to the same node, the closest point decides
+        closest = torch.full(index.shape, torch.inf, device=self.device).scatter_reduce(
+            0, nodes, node_radial, reduce="amin"
+        )
+        keep = node_radial == closest[nodes]
+        index[nodes[keep]] = node_targets[keep]
+
+        if self.trainer.training:
+            self.missed_targets(targets["center"].shape[0] - (index.unique().numel() - 1))
+        return index
+
     @staticmethod
     def _broadcast_targets(targets: list[torch.Tensor], indices: list[torch.Tensor]) -> torch.Tensor:
         """
@@ -733,6 +791,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         ],
         targets: list[Targets],
         ego_velocities: list[torch.Tensor],
+        frustum_assignments: list[dict[str, torch.Tensor] | None] | None = None,
     ) -> dict[str, torch.Tensor]:
         output = self._flatten_output_channels_last(output=output)
         feat_center_decoded = sph_to_cart_torch(self._decode_center(output["center"]))
@@ -756,14 +815,20 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
             with torch.no_grad():
                 target_labels = self._one_hot(targets[i]["class"], self.annotations.n_classes)
                 target_corners = get_corners_3d(targets[i]["center"], targets[i]["wlh"], targets[i]["orientation"])
-                index = self._assign_target_index_to_features(
-                    targets=targets[i],
-                    target_labels=target_labels,
-                    target_corners=target_corners,
-                    feat_labels=output["class"][i, ...],
-                    feat_centers=feat_center_decoded[i, ...],
-                    feat_corners=feat_corners[i, ...],
-                )
+                if self.target_assignment.strategy == "points_in_box":
+                    index = self._assign_points_in_box(
+                        targets=targets[i],
+                        assignment=frustum_assignments[i] if frustum_assignments is not None else None,
+                    )
+                else:
+                    index = self._assign_target_index_to_features(
+                        targets=targets[i],
+                        target_labels=target_labels,
+                        target_corners=target_corners,
+                        feat_labels=output["class"][i, ...],
+                        feat_centers=feat_center_decoded[i, ...],
+                        feat_corners=feat_corners[i, ...],
+                    )
             indices.append(index)
             fg = torch.ge(index, 0)
             foreground.append(fg)
@@ -993,7 +1058,12 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         # Put the EGO velocity per sample into a list
         ego_velocities = [sample["velocity"] for sample in batch["metadata"]]
         # Evaluate the losses and sum
-        losses = self.get_losses(output=network_output, targets=batch.get("targets"), ego_velocities=ego_velocities)
+        losses = self.get_losses(
+            output=network_output,
+            targets=batch.get("targets"),
+            ego_velocities=ego_velocities,
+            frustum_assignments=[sample.get("frustum_assignment") for sample in batch["metadata"]],
+        )
         losses["sum"] = self.sum_losses(losses)
         return {"loss": losses["sum"], "losses": losses, "network_output": network_output}
 
@@ -1019,7 +1089,12 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         # Put the EGO velocity per sample into a list
         ego_velocities = [sample["velocity"] for sample in batch["metadata"]]
         # Evaluate the losses and sum
-        losses = self.get_losses(output=network_output, targets=batch.get("targets"), ego_velocities=ego_velocities)
+        losses = self.get_losses(
+            output=network_output,
+            targets=batch.get("targets"),
+            ego_velocities=ego_velocities,
+            frustum_assignments=[sample.get("frustum_assignment") for sample in batch["metadata"]],
+        )
         losses["sum"] = self.sum_losses(losses)
         detections = self.get_detections(output=network_output, ego_velocities=ego_velocities)
         self.nds_val.update(batch_detections=detections, batch_targets=batch["targets"])

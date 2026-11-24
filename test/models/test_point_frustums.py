@@ -140,3 +140,58 @@ class TestPointFrustumsLosses:
         assert not torch.isclose(losses["center_radial"], zero).any()
         assert not torch.isclose(losses["center_polar"], zero).any()
         assert not torch.isclose(losses["center_azimuthal"], zero).any()
+
+
+class TestPointsInBoxAssignment:
+    """The points_in_box target assignment: from the frustums observing a target to the feature vectors."""
+
+    module_mock = Mock()
+    layer_config_kwargs = {"n_channels": 1, "downsampling_horizontal": True, "downsampling_vertical": False}
+    module_mock.fpn_layers = {
+        "l0": ConfigFPNLayer(n_blocks=1, n_channels=1, downsampling_horizontal=False, downsampling_vertical=False),
+        "l1": ConfigFPNLayer(n_blocks=1, **layer_config_kwargs),
+    }
+    module_mock.fpn_extra_layers = {}
+    module_mock.model.head.n_convolutions_classification = 1
+    module_mock.model.head.n_convolutions_regression = 1
+    # 8 azimuthal x 4 polar frustums; l0 has stride 1 (4x8 nodes), l1 the stride (1, 2) (4x4 nodes)
+    module_mock.discretization = ConfigDiscretize(
+        n_splits_pol=4, n_splits_azi=8, fov_azi_deg=(-180, 180), fov_pol_deg=(60, 100)
+    )
+    module_mock.strides = {"l0": (1, 1), "l1": (1, 2)}
+    module_mock._evaluate_receptive_fields = partial(PointFrustums._evaluate_receptive_fields, self=module_mock)
+    module_mock.register_buffer = partial(setattr, module_mock)
+    module_mock.featuremap_parametrization = PointFrustums._register_featuremap_parametrization(module_mock)
+    module_mock.device = torch.device("cpu")
+    module_mock.trainer.training = False
+    module_mock.target_assignment.level_ranges = {"l0": (0.0, 15.0), "l1": (15.0, 80.0)}
+
+    def assign(self, centers, frustum, target, radial):
+        assignment = {
+            "frustum": torch.tensor(frustum),
+            "target": torch.tensor(target),
+            "radial": torch.tensor(radial, dtype=torch.float),
+            "discretization": torch.tensor([8, 4, -180, 180, 60, 100]),
+        }
+        return PointFrustums._assign_points_in_box(self.module_mock, {"center": torch.tensor(centers)}, assignment)
+
+    def test_layers_by_range_and_closest_point(self):
+        # Target 0 at 10 m -> l0 (stride 1): the frustums 9 (row 1, column 1) and 10 map to the l0 nodes 9 and 10
+        # Target 1 at 20 m -> l1 (stride 2, offset 32): the frustum 20 (row 2, column 4) maps to the node
+        #   32 + 2 * 4 + 2 = 42, the frustum 21 (column 5) to the closest node column round(2.5) = 2 as well; target 2
+        #   (also at 20 m) has a closer point in the frustum 21 and wins the node 42
+        index = self.assign(
+            centers=[[10.0, 0.0, 0.0], [20.0, 0.0, 0.0], [0.0, 20.0, 0.0]],
+            frustum=[9, 10, 20, 21],
+            target=[0, 0, 1, 2],
+            radial=[9.0, 9.5, 19.0, 18.0],
+        )
+        assert index.shape == (32 + 16,)
+        assert index[9] == 0 and index[10] == 0
+        assert index[42] == 2
+        assert (index >= 0).sum() == 3
+
+    def test_azimuth_wraps_to_the_first_node(self):
+        # The last column (7) is closest to the node column round(3.5) = 4 -> wraps to 0 on the 4 columns of l1
+        index = self.assign(centers=[[20.0, 0.0, 0.0]], frustum=[7], target=[0], radial=[19.0])
+        assert index[32 + 0] == 0
