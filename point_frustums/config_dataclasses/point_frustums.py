@@ -186,3 +186,5 @@ class ConfigTransformerFrustumEncoder:
     checkpointing: bool = False
     # Initialize the last layer of each residual branch with zeros, each block starts as the identity
     zero_init_residual: bool = True
+    # Normalize the queries and keys before the dot product, bounds the attention logits
+    qk_norm: bool = True

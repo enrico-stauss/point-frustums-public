@@ -160,6 +160,7 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
         dropout: float = 0.1,
         checkpointing: bool = False,
         zero_init_residual: bool = True,
+        qk_norm: bool = True,
     ):
         """
         Enrich points with information from the local context by applying a sequence of n encoder blocks. The
@@ -189,6 +190,9 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
             self attention and the second layer of the feed forward networks) with zeros, so that each block starts as
             the identity and the encoder initially passes the embedded points through; the attention is phased in as
             it learns to contribute.
+        :param qk_norm: Apply a LayerNorm to the queries and keys (per head) before the dot product, in the self and in
+            the cross attention. This bounds the attention logits, which otherwise can grow with the weights and
+            saturate the softmax, especially at high learning rates.
         """
         super().__init__()
 
@@ -219,6 +223,8 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
         self.out_self_attention = nn.ModuleList()
         self.ffn_self_attention = nn.ModuleList()
         self.norm_self_attention = nn.ModuleList()
+        self.q_norm_self_attention = nn.ModuleList()
+        self.k_norm_self_attention = nn.ModuleList()
         for _ in range(self.n_encoders):
             self.qkv_self_attention.append(nn.Linear(self.n_channels_embedding, 3 * self.n_channels_embedding))
             self.out_self_attention.append(nn.Linear(self.n_channels_embedding, self.n_channels_embedding))
@@ -226,9 +232,13 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
                 self.FeedForward(self.n_channels_embedding, expansion_factor=forward_expansion, dropout=dropout)
             )
             self.norm_self_attention.append(nn.LayerNorm(self.n_channels_embedding))
+            self.q_norm_self_attention.append(nn.LayerNorm(self.n_channels_per_head) if qk_norm else nn.Identity())
+            self.k_norm_self_attention.append(nn.LayerNorm(self.n_channels_per_head) if qk_norm else nn.Identity())
 
         self.norm_cross_attention = nn.LayerNorm(self.n_channels_embedding)
         self.kv_cross_attention = nn.Linear(self.n_channels_embedding, 2 * self.n_channels_projection)
+        self.q_norm_cross_attention = nn.LayerNorm(self.n_channels_projection) if qk_norm else nn.Identity()
+        self.k_norm_cross_attention = nn.LayerNorm(self.n_channels_projection) if qk_norm else nn.Identity()
         # One learnable query per row of the featuremap (the encoding is azimuth invariant)
         self.decoder = nn.Parameter(torch.empty(self.n_splits_pol, self.n_channels_projection))
         nn.init.normal_(self.decoder, std=0.02)
@@ -282,6 +292,7 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
             .reshape(n_points, 3, self.n_heads, self.n_channels_per_head)
             .unbind(1)
         )
+        q, k = self.q_norm_self_attention[i_encoder](q), self.k_norm_self_attention[i_encoder](k)
         attention = segment_attention(q, k, v, cu_seqlens=cu_seqlens, segment_ids=segment_ids, dropout_p=dropout_p)
         x = out(attention.reshape(n_points, self.n_channels_embedding)) + x
         return self.ffn_self_attention[i_encoder](x)
@@ -332,8 +343,15 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
         k, v = self.kv_cross_attention(self.norm_cross_attention(x)).reshape(n_points, 2, 1, -1).unbind(1)
         # The query of each nonempty frustum is the one of its row [I, 1, L]
         query = self.decoder[torch.div(i_unique, self.n_splits_azi, rounding_mode="floor")][:, None, :]
+        # The normalization applies to the logits only, the residual connection adds the unnormalized query
         attention = segment_softmax_pooling(
-            query, k, v, segment_ids=segment_ids, n_segments=n_frustums, dropout_p=dropout_p, training=self.training
+            self.q_norm_cross_attention(query),
+            self.k_norm_cross_attention(k),
+            v,
+            segment_ids=segment_ids,
+            n_segments=n_frustums,
+            dropout_p=dropout_p,
+            training=self.training,
         )
 
         feats = pc.new_zeros((self.n_splits, self.n_channels_projection))
