@@ -147,3 +147,38 @@ def test_zero_init_residual_starts_the_blocks_as_identity(zero_init_residual: bo
     cu_seqlens = torch.nn.functional.pad(torch.cumsum(counts, dim=0), (1, 0))
     out = tfe._encoder_block(x, cu_seqlens, i_inv, 0, 0.2)  # pylint: disable=protected-access
     assert torch.equal(out, x) == zero_init_residual
+
+
+@pytest.mark.parametrize("qk_norm", [True, False])
+def test_qk_norm_makes_the_attention_invariant_to_the_query_and_key_scale(qk_norm: bool):
+    tfe = TransformerFrustumEncoder(
+        n_splits_azi=N_AZI,
+        n_splits_pol=N_POL,
+        n_channels_in=8,
+        n_channels_embedding=8,
+        n_channels_projection=12,
+        n_heads=2,
+        n_encoders=1,
+        dropout=0.0,
+        zero_init_residual=False,
+        qk_norm=qk_norm,
+    ).eval()
+    i_unique, i_inv, counts = frustum_layout([1, 5, 12, 3], [0, 3, 9, 30])
+    pc = torch.randn(int(counts.sum()), 8)
+    cu_seqlens = torch.nn.functional.pad(torch.cumsum(counts, dim=0), (1, 0))
+
+    def outputs():
+        block = tfe._encoder_block(pc, cu_seqlens, i_inv, 0, 0.0)  # pylint: disable=protected-access
+        return block, tfe(pc, i_unique=i_unique, i_inv=i_inv, counts=counts)
+
+    block, out = outputs()
+    # Scale the query and key projections of the self attention and the key projection of the cross attention (as
+    #   the weights may grow during training): with the normalization, the logits and hence the outputs do not change
+    with torch.no_grad():
+        tfe.qkv_self_attention[0].weight[:16] *= 50
+        tfe.qkv_self_attention[0].bias[:16] *= 50
+        tfe.kv_cross_attention.weight[:12] *= 50
+        tfe.kv_cross_attention.bias[:12] *= 50
+    block_scaled, out_scaled = outputs()
+    assert torch.allclose(block, block_scaled, atol=1e-4) == qk_norm
+    assert torch.allclose(out, out_scaled, atol=1e-4) == qk_norm
