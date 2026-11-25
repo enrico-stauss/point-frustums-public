@@ -118,3 +118,12 @@ def test_checkpointing_gives_the_same_gradients():
         grads.append([p.grad.clone() for p in tfe.parameters()])
     for a, b in zip(*grads, strict=True):
         torch.testing.assert_close(a, b)
+
+
+def test_feed_forward_dropout_leaves_the_identity_path_intact():
+    ffn = TransformerFrustumEncoder.FeedForward(16, dropout=0.5).train()
+    # With a residual branch that outputs zero, the block is the identity even while dropout is active
+    torch.nn.init.zeros_(ffn.network[-1].weight)
+    torch.nn.init.zeros_(ffn.network[-1].bias)
+    x = torch.randn(100, 16)
+    torch.testing.assert_close(ffn(x), x, rtol=0, atol=0)
