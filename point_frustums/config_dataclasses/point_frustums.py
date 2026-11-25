@@ -172,3 +172,5 @@ class ConfigTransformerFrustumEncoder:
     dropout: float = 0.1
     # Recompute the activations of the encoder blocks in the backward pass (less memory, more compute)
     checkpointing: bool = False
+    # Initialize the last layer of each residual branch with zeros, each block starts as the identity
+    zero_init_residual: bool = True

@@ -127,3 +127,23 @@ def test_feed_forward_dropout_leaves_the_identity_path_intact():
     torch.nn.init.zeros_(ffn.network[-1].bias)
     x = torch.randn(100, 16)
     torch.testing.assert_close(ffn(x), x, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("zero_init_residual", [True, False])
+def test_zero_init_residual_starts_the_blocks_as_identity(zero_init_residual: bool):
+    tfe = TransformerFrustumEncoder(
+        n_splits_azi=N_AZI,
+        n_splits_pol=N_POL,
+        n_channels_in=8,
+        n_channels_embedding=8,
+        n_channels_projection=12,
+        n_heads=2,
+        n_encoders=2,
+        dropout=0.2,
+        zero_init_residual=zero_init_residual,
+    ).train()
+    _, i_inv, counts = frustum_layout([1, 5, 12, 3], [0, 3, 9, 30])
+    x = torch.randn(int(counts.sum()), 8)
+    cu_seqlens = torch.nn.functional.pad(torch.cumsum(counts, dim=0), (1, 0))
+    out = tfe._encoder_block(x, cu_seqlens, i_inv, 0, 0.2)  # pylint: disable=protected-access
+    assert torch.equal(out, x) == zero_init_residual

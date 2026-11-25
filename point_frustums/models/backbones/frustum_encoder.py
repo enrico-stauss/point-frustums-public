@@ -164,6 +164,7 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
         forward_expansion: int = 4,
         dropout: float = 0.1,
         checkpointing: bool = False,
+        zero_init_residual: bool = True,
     ):
         """
         Enrich points with information from the local context by applying a sequence of n encoder blocks. The
@@ -189,6 +190,10 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
         :param dropout:
         :param checkpointing: Recompute the activations of the encoder blocks in the backward pass instead of storing
             them; these dominate the memory (several per point and channel) while being cheap to evaluate.
+        :param zero_init_residual: Initialize the last layer of each residual branch (the output projection of the
+            self attention and the second layer of the feed forward networks) with zeros, so that each block starts as
+            the identity and the encoder initially passes the embedded points through; the attention is phased in as
+            it learns to contribute.
         """
         super().__init__()
 
@@ -235,6 +240,16 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
         self.ffn_cross_attention = self.FeedForward(
             self.n_channels_projection, expansion_factor=forward_expansion, dropout=dropout
         )
+
+        if zero_init_residual:
+            residual_outputs = [
+                *self.out_self_attention,
+                *(ffn.network[-1] for ffn in self.ffn_self_attention),
+                self.ffn_cross_attention.network[-1],
+            ]
+            for layer in residual_outputs:
+                nn.init.zeros_(layer.weight)
+                nn.init.zeros_(layer.bias)
 
     def _select_points(self, i_inv: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
         """
