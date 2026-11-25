@@ -143,7 +143,8 @@ class TransformerFrustumEncoder(nn.Module):  # pylint: disable=too-many-instance
             self.dropout = nn.Dropout(dropout)
 
         def forward(self, x) -> torch.Tensor:
-            return self.dropout(self.network(self.norm(x)) + x)
+            # Pre-LN residual block: the dropout applies to the residual branch only, the identity path stays intact
+            return x + self.dropout(self.network(self.norm(x)))
 
     def __init__(  # pylint: disable=too-many-arguments
         self,
