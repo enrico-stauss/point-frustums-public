@@ -1,6 +1,7 @@
 import torch
+from torch.utils.data import DataLoader, Dataset
 
-from point_frustums.augmentations import AssignFrustumsToTargets, KeepSweeps
+from point_frustums.augmentations import AssignFrustumsToTargets, KeepSweeps, SubsampleData
 from point_frustums.config_dataclasses.point_frustums import ConfigDiscretize
 from point_frustums.geometry.coordinate_system_conversion import cart_to_sph_torch
 
@@ -44,3 +45,40 @@ def test_assign_frustums_to_targets():
     assignment = dict(zip(result["frustum"].tolist(), result["target"].tolist()))
     # The closest point (of box 0) decides in the shared frustum; the point between the boxes is not assigned
     assert assignment == {int(frustum[0]): 0, int(frustum[2]): 2}
+
+
+def test_subsample_data_keeps_a_random_ordered_subset():
+    points = torch.arange(1000, dtype=torch.float)[:, None].repeat(1, 8)
+    augmentation = SubsampleData(apply_to=["lidar"], drop_ratio=0.4)
+    sizes = set()
+    for _ in range(20):
+        metadata = {"augmentations": {"SubsampleData": {}}}
+        kept = augmentation.lidar(points.clone(), metadata)
+        # Between 60% and 100% of the points remain, unchanged and in their original order
+        assert 600 <= kept.shape[0] <= 1000
+        assert (kept[:, 0].diff() > 0).all()
+        assert torch.equal(kept, points[kept[:, 0].long()])
+        assert abs(metadata["augmentations"]["SubsampleData"]["keep_ratio"] * 1000 - kept.shape[0]) <= 1
+        sizes.add(kept.shape[0])
+    # The ratio is drawn for each sample
+    assert len(sizes) > 10
+
+
+class _SubsampledIndices(Dataset):
+    def __init__(self):
+        self.augmentation = SubsampleData(apply_to=["lidar"], drop_ratio=0.5)
+
+    def __len__(self):
+        return 4
+
+    def __getitem__(self, index):
+        return tuple(self.augmentation.lidar(torch.arange(100)[:, None], None)[:, 0].tolist())
+
+
+def test_subsample_data_differs_between_workers_and_epochs():
+    # The augmentation is copied into each DataLoader worker; the subsets must still differ between the workers and
+    #   between the epochs
+    loader = DataLoader(_SubsampledIndices(), batch_size=None, num_workers=2)
+    subsets = [subset for _ in range(2) for subset in loader]
+    assert len(subsets) == 8
+    assert len({tuple(subset) for subset in subsets}) == 8
