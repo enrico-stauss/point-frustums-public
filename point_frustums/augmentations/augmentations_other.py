@@ -75,27 +75,33 @@ class Normalize(Augmentation):
 
 class SubsampleData(Augmentation):
     """
-    Randomly subsample the data.
+    Randomly subsample the data: drop a random fraction of the points, drawn uniformly from [0, drop_ratio] for each
+    sample, so that the point density seen during training includes the one of the full point clouds seen during
+    evaluation.
     """
 
     def __init__(self, drop_ratio, n_max=1_000_000, **kwargs):
         super().__init__(**kwargs)
         assert 0 <= drop_ratio <= 1
-        self._keep_ratio = 1 - drop_ratio
+        self.drop_ratio = drop_ratio
         self._n_max = n_max
-        self._rng = torch.Generator()
 
     def lidar(self, data: torch.Tensor, metadata: Optional[MutableMapping]):
         """
-        Remove a fraction of the points.
+        Remove a fraction of the points, the remaining points keep their order.
+        The global torch RNG is used: the DataLoader seeds it differently for each worker and epoch, whereas a
+        generator owned by the augmentation is copied into each worker with the same state, so each worker (and each
+        epoch) would draw the same sequence.
         :param data:
         :param metadata:
         :return:
         """
-        n_points, n_dims = data.shape
-        indices_full = torch.randperm(n_points, generator=self._rng)
-        n_points = ceil(self._keep_ratio * (min(n_points, self._n_max)))
-        indices = indices_full[:n_points]
+        n_points = data.shape[0]
+        keep_ratio = 1 - self.drop_ratio * torch.rand(()).item()
+        n_keep = ceil(keep_ratio * min(n_points, self._n_max))
+        indices = torch.randperm(n_points)[:n_keep].sort().values
+        if metadata is not None:
+            metadata["augmentations"][str(self)] = {"keep_ratio": keep_ratio}
         return data[indices, ...]
 
     def camera(self, data: torch.Tensor, metadata: Optional[MutableMapping]):
