@@ -562,7 +562,7 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
             b=supply,
             M=cost,
             reg=self.target_assignment.epsilon,
-            reg_m=(1.0, 1.0),  # Relax the supply marginal and mildly relax also the demand marginal
+            reg_m=tuple(self.target_assignment.rho),
             stop_thr=self.target_assignment.threshold,
             max_iter=self.target_assignment.max_iter,
         )
