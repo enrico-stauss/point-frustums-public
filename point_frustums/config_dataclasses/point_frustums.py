@@ -78,6 +78,10 @@ class TargetAssignment:
     epsilon: float = 2e-1
     # The maximum number of iterations to perform
     max_iter: int = 2500
+    # The KL penalties of the marginals of the unbalanced OT problem: (demand of the predictions, supply of the targets).
+    #   Small values relax the marginal (a target may receive fewer predictions than its dynamic k), large values
+    #   approach the balanced problem of OTA.
+    rho: tuple[float, float] = (1.0, 1.0)
 
     # Configure the upper and lower bound multipliers for the RF sizes assigned to targets
     upper_bound_multiplier: float = 1.4
