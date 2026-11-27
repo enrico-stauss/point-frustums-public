@@ -23,14 +23,14 @@ trainer:
         save_on_train_epoch_end: False
         auto_insert_metric_name: False
         every_n_epochs: 1
-    - #- LearningRateFinder
-      #- class_path: point_frustums.callbacks.GradientClipping
-      #  init_args:
-      #    clip_value: 1.0
-      #- point_frustums.callbacks.CreateNuScenesSubmission
-      #- class_path: point_frustums.callbacks.ModelWeightsFromCheckpoint
-      #  init_args:
-      #    checkpoint_path: training_logs/lightning_logs/version_256/checkpoints/epoch=1-step=162.ckpt
+    #- LearningRateFinder
+    #- class_path: point_frustums.callbacks.GradientClipping
+    #  init_args:
+    #    clip_value: 1.0
+    #- point_frustums.callbacks.CreateNuScenesSubmission
+    #- class_path: point_frustums.callbacks.ModelWeightsFromCheckpoint
+    #  init_args:
+    #    checkpoint_path: training_logs/lightning_logs/version_256/checkpoints/epoch=1-step=162.ckpt
   logger:
     - class_path: pytorch_lightning.loggers.TensorBoardLogger
       init_args:
