@@ -67,9 +67,22 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         losses: Losses,
         predictions: Predictions,
         logging: Logging,
+        lr: float = 5e-3,
+        lr_schedule: Literal["one_cycle", "constant"] = "one_cycle",
+        warmup_steps: int = 0,
         **kwargs,
     ):
+        """
+        :param lr: The peak learning rate of the one cycle schedule or the constant learning rate
+        :param lr_schedule: "one_cycle" anneals over trainer.max_epochs, so a run cannot be extended on resumption;
+            "constant" ramps up linearly over warmup_steps and keeps the learning rate constant after that, a run can be
+            resumed with more epochs and a different lr
+        :param warmup_steps: The number of steps of the linear warmup of the constant schedule
+        """
         super().__init__(*args, model=model, **kwargs)
+        self.lr = lr
+        self.lr_schedule = lr_schedule
+        self.warmup_steps = warmup_steps
         self.discretization = deepcopy(self.model.backbone.lidar.discretize)
         self.strides = deepcopy(self.model.neck.fpn.strides)
         self.fpn_layers = deepcopy(self.model.neck.fpn.layers)
@@ -1118,34 +1131,40 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
     def test_step(self, batch, batch_idx):
         pass
 
-    def configure_optimizers(self, *args, **kwargs):
-        lr = 5e-3
-        optimizer = optim.AdamW(params=self.parameters(), lr=lr, weight_decay=0.01, amsgrad=False)
-        steps_per_epoch = ceil(len(self.trainer.train_dataloader) / self.trainer.accumulate_grad_batches)
-        lr_scheduler = optim.lr_scheduler.OneCycleLR(
-            optimizer=optimizer,
-            max_lr=lr,
-            epochs=self.trainer.max_epochs,
-            steps_per_epoch=steps_per_epoch,
-            div_factor=50,
-            final_div_factor=1e4,
-        )
-        # n = 2
-        # interval = ceil(self.trainer.max_epochs / (n + 1))
-        # milestones = [i * interval for i in range(1, n + 1) if i < self.trainer.max_epochs]
-        # lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=0.1)
+    def _warmup_factor(self, step: int) -> float:
+        return min(1.0, (step + 1) / self.warmup_steps) if self.warmup_steps > 0 else 1.0
 
-        # lr_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        #   optimizer=optimizer,
-        #   T_0=ceil(2.5*steps_per_epoch),
-        #   T_mult=2,
-        #   eta_min=1e-7)
-        # lr_scheduler = optim.lr_scheduler.ConstantLR(
-        #   optimizer=optimizer,
-        #   total_iters=self.trainer.max_epochs,
-        #   factor=1.0)
+    def configure_optimizers(self, *args, **kwargs):
+        optimizer = optim.AdamW(params=self.parameters(), lr=self.lr, weight_decay=0.01, amsgrad=False)
+        if self.lr_schedule == "one_cycle":
+            steps_per_epoch = ceil(len(self.trainer.train_dataloader) / self.trainer.accumulate_grad_batches)
+            lr_scheduler = optim.lr_scheduler.OneCycleLR(
+                optimizer=optimizer,
+                max_lr=self.lr,
+                epochs=self.trainer.max_epochs,
+                steps_per_epoch=steps_per_epoch,
+                div_factor=50,
+                final_div_factor=1e4,
+            )
+        elif self.lr_schedule == "constant":
+            lr_scheduler = optim.lr_scheduler.LambdaLR(optimizer=optimizer, lr_lambda=self._warmup_factor)
+        else:
+            raise ValueError(f"Unknown lr_schedule '{self.lr_schedule}'")
         lr_scheduler_config = {
             "scheduler": lr_scheduler,
             "interval": "step",
         }
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_config}
+
+    def on_train_start(self) -> None:
+        # On resumption, the optimizer and scheduler states restore the learning rate of the checkpoint; apply the
+        #   configured one instead so that a resumed run can continue with a different (e.g. decayed) learning rate
+        if self.lr_schedule != "constant":
+            return
+        for config in self.trainer.lr_scheduler_configs:
+            scheduler = config.scheduler
+            scheduler.base_lrs = [self.lr] * len(scheduler.base_lrs)
+            for group in scheduler.optimizer.param_groups:
+                group["initial_lr"] = self.lr
+                # LambdaLR sets lr = base_lr * lr_lambda(last_epoch) on each step
+                group["lr"] = self.lr * self._warmup_factor(scheduler.last_epoch)
