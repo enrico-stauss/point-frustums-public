@@ -1,0 +1,595 @@
+# pytorch_lightning==2.6.6
+seed_everything: 42
+trainer:
+  accelerator: mps
+  strategy: auto
+  devices: auto
+  num_nodes: 1
+  precision: null
+  logger:
+  - class_path: pytorch_lightning.loggers.TensorBoardLogger
+    init_args:
+      save_dir: training_logs/ot-baseline
+      name: lightning_logs
+      version: null
+      log_graph: false
+      default_hp_metric: true
+      prefix: ''
+      sub_dir: null
+      comment: ''
+      purge_step: null
+      max_queue: 10
+      flush_secs: 120
+      filename_suffix: ''
+  callbacks:
+  - class_path: pytorch_lightning.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: null
+      log_momentum: false
+      log_weight_decay: false
+  - class_path: point_frustums.callbacks.TargetExposureMonitor
+  - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: null
+      filename: null
+      monitor: Metric/NDS/val
+      verbose: false
+      save_last: null
+      save_top_k: 1
+      save_on_exception: false
+      save_weights_only: false
+      mode: max
+      auto_insert_metric_name: false
+      every_n_train_steps: null
+      train_time_interval: null
+      every_n_epochs: null
+      save_on_train_epoch_end: false
+      enable_version_counter: true
+  - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: null
+      filename: last
+      monitor: null
+      verbose: false
+      save_last: null
+      save_top_k: 1
+      save_on_exception: false
+      save_weights_only: false
+      mode: min
+      auto_insert_metric_name: true
+      every_n_train_steps: null
+      train_time_interval: null
+      every_n_epochs: null
+      save_on_train_epoch_end: false
+      enable_version_counter: false
+  fast_dev_run: false
+  max_epochs: 4
+  min_epochs: null
+  max_steps: -1
+  min_steps: null
+  max_time: null
+  limit_train_batches: null
+  limit_val_batches: null
+  limit_test_batches: null
+  limit_predict_batches: null
+  overfit_batches: 0.0
+  val_check_interval: null
+  check_val_every_n_epoch: 2
+  num_sanity_val_steps: 0
+  log_every_n_steps: 1
+  enable_checkpointing: null
+  enable_progress_bar: null
+  enable_model_summary: null
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1
+  gradient_clip_algorithm: norm
+  deterministic: null
+  benchmark: null
+  inference_mode: true
+  use_distributed_sampler: true
+  profiler: null
+  detect_anomaly: false
+  barebones: false
+  plugins: null
+  sync_batchnorm: false
+  reload_dataloaders_every_n_epochs: 0
+  default_root_dir: training_logs/ot-baseline
+  enable_autolog_hparams: true
+  model_registry: null
+model:
+  class_path: point_frustums.models.point_frustums.PointFrustums
+  init_args:
+    model:
+      class_path: point_frustums.models.point_frustums.PointFrustumsModel
+      init_args:
+        backbone:
+          class_path: point_frustums.models.backbones.PointFrustumsBackbone
+          init_args:
+            lidar:
+              class_path: point_frustums.models.backbones.frustum_encoder.FrustumEncoder
+              init_args:
+                channels_in:
+                - x
+                - y
+                - z
+                - intensity
+                - timestamp
+                - radial
+                - polar
+                - azimuthal
+                discretize:
+                  n_splits_azi: 360
+                  n_splits_pol: 40
+                  fov_azi_deg:
+                  - -180.0
+                  - 180.0
+                  fov_pol_deg:
+                  - 80.0
+                  - 120.0
+                decorate:
+                  functions:
+                  - id: relative_angle
+                    channel: azimuthal
+                    std: 0.29
+                  - id: relative_angle
+                    channel: polar
+                    std: 0.29
+                  - id: distance_to_mean
+                    channel: radial
+                    std: 0.55
+                  - id: distance_to_mean_local
+                    channel: x
+                    std: 3.5
+                  - id: distance_to_mean_local
+                    channel: y
+                    std: 0.09
+                  - id: distance_to_mean
+                    channel: z
+                    std: 0.3
+                  - id: distance_to_min
+                    channel: radial
+                    std: 0.4
+                  channels_out:
+                  - z
+                  - intensity
+                  - timestamp
+                  - radial
+                  - delta_azi
+                  - delta_pol
+                  - delta_r
+                  - delta_longitudinal
+                  - delta_lateral
+                  - delta_z
+                  - delta_r_min
+                vectorize:
+                  layers:
+                  - 64
+                  - 64
+                symmetrize:
+                - max
+                reduce:
+                  layers:
+                  - 64
+                transformer_frustum_encoder: null
+                dropout: 0.1
+            camera: null
+            radar: null
+        neck:
+          class_path: point_frustums.models.necks.PointFrustumsNeck
+          init_args:
+            target_sensor: LIDAR_TOP
+            fpn:
+              class_path: point_frustums.models.necks.spherical_coos_fpn.FPN
+              init_args:
+                n_channels_in: 64
+                n_channels_out: 64
+                layers:
+                  l0:
+                    n_blocks: 3
+                    n_channels: 64
+                    downsampling_horizontal: false
+                    downsampling_vertical: false
+                  l1:
+                    n_blocks: 3
+                    n_channels: 64
+                    downsampling_horizontal: true
+                    downsampling_vertical: true
+                  l2:
+                    n_blocks: 3
+                    n_channels: 64
+                    downsampling_horizontal: false
+                    downsampling_vertical: false
+                  l3:
+                    n_blocks: 3
+                    n_channels: 64
+                    downsampling_horizontal: true
+                    downsampling_vertical: true
+                  l4:
+                    n_blocks: 2
+                    n_channels: 64
+                    downsampling_horizontal: true
+                    downsampling_vertical: true
+                extra_layers: {}
+                dropout: 0.1
+                upsampling_mode: aligned
+            map_camera: null
+            map_radar: null
+        head:
+          class_path: point_frustums.models.heads.PointFrustumsHead
+          init_args:
+            n_channels_in: 64
+            layers_in:
+            - l0
+            - l1
+            - l2
+            - l3
+            - l4
+            n_classes: 10
+            n_attributes: 8
+            n_convolutions_classification: 4
+            n_convolutions_regression: 4
+            share_weights: false
+            norm_group_size: 8
+            dropout: 0.1
+    target_assignment:
+      alpha: 1.5
+      beta: 1.0
+      gamma: 1.2
+      kappa: 4.0
+      min_k: 5
+      max_k: 30
+      threshold: 0.001
+      epsilon: 0.1
+      max_iter: 1000
+      rho:
+      - 1.0
+      - 1.0
+      upper_bound_multiplier: 2.0
+      lower_bound_multiplier: 0.8
+      strategy: optimal_transport
+      level_ranges: null
+    losses:
+      label:
+        active: true
+        weight: 2.0
+        from_epoch: 0
+        kwargs: {}
+      attribute:
+        active: true
+        weight: 1.0
+        from_epoch: 0
+        kwargs: {}
+      vfl:
+        active: true
+        weight: 1.0
+        from_epoch: 0
+        kwargs: {}
+      center_radial:
+        active: true
+        weight: 2.0
+        from_epoch: 0
+        kwargs:
+          beta: 0.2
+      center_polar:
+        active: true
+        weight: 1.0
+        from_epoch: 0
+        kwargs:
+          beta: 0.05
+      center_azimuthal:
+        active: true
+        weight: 1.0
+        from_epoch: 0
+        kwargs:
+          beta: 0.05
+      wlh:
+        active: true
+        weight: 1.0
+        from_epoch: 0
+        kwargs: {}
+      orientation:
+        active: true
+        weight: 1.0
+        from_epoch: 0
+        kwargs:
+          beta: 0.1
+      velocity:
+        active: true
+        weight: 1.0
+        from_epoch: 0
+        kwargs: {}
+    predictions:
+      score_vfl_factor: 0.0
+      score_threshold: 0.05
+      top_k: 1000
+      n_detections: 100
+      nms_threshold: 0.4
+    logging:
+      frequency_log_train_sample: 10000
+      frequency_log_val_sample: null
+      render_target_assignment: false
+    lr: 0.005
+    lr_schedule: one_cycle
+    warmup_steps: 0
+data:
+  class_path: point_frustums.dataloaders.NuScenesDataModule
+  init_args:
+    dataset:
+      name: NuScenes
+      version: v1.0-mini
+      sensors:
+        LIDAR_TOP:
+          active: true
+          modality: lidar
+          channels_out:
+          - x
+          - y
+          - z
+          - intensity
+          - timestamp
+          - radial
+          - polar
+          - azimuthal
+          angle_of_view_degrees:
+            polar: 40
+            azimuthal: 360
+          orientation_degrees:
+            polar: 0
+            azimuthal: -90
+          sweeps: 10
+          resolution: null
+        CAM_FRONT:
+          active: false
+          modality: camera
+          channels_out:
+          - r
+          - g
+          - b
+          angle_of_view_degrees:
+            polar: 40
+            azimuthal: 70
+          orientation_degrees:
+            polar: 90
+            azimuthal: 0
+          sweeps: null
+          resolution:
+            polar: 900
+            azimuthal: 1600
+      annotations:
+        coos: LIDAR_TOP
+        visibility: 0.0
+        class_aliases:
+        - pedestrian
+        - car
+        - bus
+        - bicycle
+        - truck
+        - trailer
+        - construction_vehicle
+        - traffic_cone
+        - barrier
+        - motorcycle
+        alias_to_class:
+          pedestrian: human.pedestrian
+          car: vehicle.car
+          bus: vehicle.bus
+          bicycle: vehicle.bicycle
+          truck: vehicle.truck
+          trailer: vehicle.trailer
+          construction_vehicle: vehicle.construction
+          traffic_cone: movable_object.trafficcone
+          barrier: movable_object.barrier
+          motorcycle: vehicle.motorcycle
+        alias_to_category:
+          pedestrian: pedestrian
+          car: vehicle
+          bus: vehicle
+          bicycle: cycle
+          truck: vehicle
+          trailer: vehicle
+          construction_vehicle: vehicle
+          traffic_cone: other
+          barrier: other
+          motorcycle: cycle
+        category_to_attributes:
+          pedestrian:
+          - moving
+          - standing
+          - sitting_lying_down
+          vehicle:
+          - moving
+          - parked
+          - stopped
+          cycle:
+          - with_rider
+          - without_rider
+          other:
+          - void
+      load_velocity: true
+      load_can: true
+    augmentations:
+      train:
+      - class_path: point_frustums.augmentations.SubsampleData
+        init_args:
+          drop_ratio: 0.4
+          n_max: 1000000
+          apply_to:
+          - lidar
+      - class_path: point_frustums.augmentations.RandomFlipHorizontal
+        init_args:
+          dimension_mapping_lidar:
+            y: 1
+            azimuthal: 7
+          probability: 0.5
+          apply_to:
+          - lidar
+          - targets
+      - class_path: point_frustums.augmentations.RandomRotate
+        init_args:
+          dimension_mapping_lidar:
+            x: 0
+            y: 1
+            z: 2
+            azimuthal: 7
+          probability: 0.8
+          apply_to:
+          - lidar
+          - targets
+      - class_path: point_frustums.augmentations.Normalize
+        init_args:
+          lidar:
+            channels:
+            - 2
+            - 3
+            - 4
+            - 5
+            mean:
+            - -0.6121
+            - 18.2659
+            - 0.2472
+            - 13.51
+            std:
+            - 2.1382
+            - 20.4559
+            - 0.1445
+            - 12.9925
+          camera:
+            channels:
+            - 0
+            - 1
+            - 2
+            mean:
+            - 123.675
+            - 116.28
+            - 103.53
+            std:
+            - 58.395
+            - 57.12
+            - 57.375
+          radar: null
+          apply_to:
+          - lidar
+      val:
+      - class_path: point_frustums.augmentations.Normalize
+        init_args:
+          lidar:
+            channels:
+            - 2
+            - 3
+            - 4
+            - 5
+            mean:
+            - -0.6121
+            - 18.2659
+            - 0.2472
+            - 13.51
+            std:
+            - 2.1382
+            - 20.4559
+            - 0.1445
+            - 12.9925
+          camera:
+            channels:
+            - 0
+            - 1
+            - 2
+            mean:
+            - 123.675
+            - 116.28
+            - 103.53
+            std:
+            - 58.395
+            - 57.12
+            - 57.375
+          radar: null
+          apply_to:
+          - lidar
+      test:
+      - class_path: point_frustums.augmentations.Normalize
+        init_args:
+          lidar:
+            channels:
+            - 2
+            - 3
+            - 4
+            - 5
+            mean:
+            - -0.6121
+            - 18.2659
+            - 0.2472
+            - 13.51
+            std:
+            - 2.1382
+            - 20.4559
+            - 0.1445
+            - 12.9925
+          camera:
+            channels:
+            - 0
+            - 1
+            - 2
+            mean:
+            - 123.675
+            - 116.28
+            - 103.53
+            std:
+            - 58.395
+            - 57.12
+            - 57.375
+          radar: null
+          apply_to:
+          - lidar
+      predict:
+      - class_path: point_frustums.augmentations.Normalize
+        init_args:
+          lidar:
+            channels:
+            - 2
+            - 3
+            - 4
+            - 5
+            mean:
+            - -0.6121
+            - 18.2659
+            - 0.2472
+            - 13.51
+            std:
+            - 2.1382
+            - 20.4559
+            - 0.1445
+            - 12.9925
+          camera:
+            channels:
+            - 0
+            - 1
+            - 2
+            mean:
+            - 123.675
+            - 116.28
+            - 103.53
+            std:
+            - 58.395
+            - 57.12
+            - 57.375
+          radar: null
+          apply_to:
+          - lidar
+    predict_split: val
+    data_root: null
+    streaming_data_root: litdata/nuscenes-trainval-lidar
+    streaming_chunk_size: 50
+    streaming_cache_size: 16GB
+    batch_size: 4
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    drop_last: false
+    sampling:
+      strategy: target_count
+      class_weights: null
+      max_frame_weight: null
+      num_samples: null
+optimizer: null
+lr_scheduler: null
+ckpt_path: null
+weights_only: null
