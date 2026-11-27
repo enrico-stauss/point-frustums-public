@@ -113,6 +113,8 @@ def test_incremental_build_on_mini(tmp_path, monkeypatch):
         args=[
             "--config", CONFIG,
             "--data.streaming_data_root=null",
+            # The test symlinks the mini split, independent of the version of the default config
+            "--data.dataset.version=v1.0-mini",
             "--trainer.logger=false",
             "--trainer.accelerator=cpu",
         ],
