@@ -8,7 +8,6 @@ from typing import Literal, Optional, Any
 
 import pytorch_lightning.loggers
 import torch
-from ot.unbalanced import sinkhorn_unbalanced_translation_invariant
 from torch import nn, optim
 from torch.nn import functional as F
 from torchvision.ops import sigmoid_focal_loss
@@ -41,6 +40,7 @@ from point_frustums.metrics.detection.featuremap_level_assignments import (
 )
 from point_frustums.metrics.detection.nds import NuScenesDetectionScore
 from point_frustums.ops.nms import nms_3d
+from point_frustums.ops.sinkhorn import sinkhorn_unbalanced_ti
 from point_frustums.utils.custom_types import Targets
 from point_frustums.utils.logging import log_pointcloud
 from point_frustums.utils.plotting import render_target_assignment
@@ -555,16 +555,16 @@ class PointFrustums(Detection3DRuntime):  # pylint: disable=too-many-ancestors
         unassigned_supply = self.featuremap_parametrization.total_size - supply.sum()
         supply = torch.cat((supply, unassigned_supply[None]))
 
-        # Evaluate the transport plan PI of the optimal transport problem (Comprehensive read: arXiv:1803.00567 p 62-84)
-        pi = sinkhorn_unbalanced_translation_invariant(
+        # Evaluate the transport plan PI of the unbalanced optimal transport problem (translation invariant Sinkhorn,
+        # the derivation and references: point_frustums/ops/csrc/sinkhorn/ReadMe.md)
+        pi = sinkhorn_unbalanced_ti(
             a=demand,
             b=supply,
             M=cost,
             reg=self.target_assignment.epsilon,
             reg_m=(1.0, 1.0),  # Relax the supply marginal and mildly relax also the demand marginal
-            reg_type="kl",
-            stopThr=self.target_assignment.threshold,
-            numItermax=self.target_assignment.max_iter,
+            stop_thr=self.target_assignment.threshold,
+            max_iter=self.target_assignment.max_iter,
         )
 
         # Rescale s.t. the maximum pi for each target equals 1.
