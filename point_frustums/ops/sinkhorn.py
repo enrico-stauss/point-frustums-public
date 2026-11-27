@@ -59,7 +59,7 @@ def _sinkhorn_metal(
     stop_thr: float,
     max_iter: int,
     check_every: int = 5,
-) -> tuple[list[torch.Tensor], torch.Tensor]:
+) -> tuple[list[torch.Tensor], list[int]]:
     device = problems[0][2].device
     params = torch.tensor([*_parameters(reg, reg_m).values(), stop_thr, max_iter], dtype=torch.float32, device=device)
     a = torch.cat([p[0].reshape(-1) for p in problems]).float().contiguous()
@@ -107,6 +107,9 @@ def _sinkhorn_metal(
         if (i + 1) % check_every == 0 and not bool((status == 0).any()):
             break
     lib.sinkhorn_plan(K, u, v, info, blocks, **rows)
+    # Wait for the kernels before the scratch buffers of this function are released: the MPS stream does not retain
+    # the buffers of custom kernels, so the allocator could otherwise reuse (or unmap) memory that is still in use
+    n_iter = n_iter.tolist()
     plans = [chunk.view(n, c) for chunk, (n, c) in zip(K.split([n * c for n, c in shapes]), shapes)]
     return plans, n_iter
 
@@ -178,7 +181,7 @@ def sinkhorn_unbalanced_ti_batch(
     if any(metal):
         index = [i for i, m in enumerate(metal) if m]
         result, iters = _sinkhorn_metal([problems[i] for i in index], reg, tuple(reg_m), stop_thr, max_iter)
-        for i, plan, it in zip(index, result, iters.tolist()):
+        for i, plan, it in zip(index, result, iters):
             plans[i], n_iter[i] = plan, it
     for i, m in enumerate(metal):
         if not m:
